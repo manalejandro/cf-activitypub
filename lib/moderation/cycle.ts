@@ -284,15 +284,17 @@ async function screenSuspiciousAccounts(env: GuardianCycleEnv): Promise<void> {
 
 /** Detect accounts repeatedly posting the same content (spambot signature). */
 export async function detectRepeatedSpam(env: GuardianCycleEnv): Promise<void> {
-  // The 24h window grouping is one of the heaviest DB scans in the cron (a
-  // temp B-tree over every note of the window, 800ms per pass in production
-  // analytics). It is a backstop — the content gate screens each status as it
-  // arrives — so a wider interval costs nothing but CPU. Per-actor markers
-  // still prevent re-actions.
+  // The 24h window grouping is one of the heaviest DB scans in the cron: on
+  // cf-ap it reads 75k rows (37.6k notes/day, the temp B-tree spills to disk)
+  // and costs ~200ms per pass — and it recomputed the SAME window every 15
+  // minutes, 96 times a day. It is a backstop (the content gate screens each
+  // status as it arrives, and per-actor markers prevent re-actions), so an
+  // hourly cadence detects the same groups with a 4x smaller bill: 1.8M rows
+  // read/day instead of 7.2M, and no 2s spill pass.
   if (env.KV) {
     try {
       if (await env.KV.get("guardian:spamdup_run")) return;
-      await env.KV.put("guardian:spamdup_run", "1", { expirationTtl: 900 });
+      await env.KV.put("guardian:spamdup_run", "1", { expirationTtl: 3600 });
     } catch {
       // best-effort throttle — keep scanning
     }
@@ -305,6 +307,13 @@ export async function detectRepeatedSpam(env: GuardianCycleEnv): Promise<void> {
   // to 3000 posts and analyse them in JS every 5 minutes on every instance.
   // `>= 3` lets case/whitespace variants merge into one group below, where
   // `contentHash` normalizes them and the total must still reach 5.
+  //
+  // Cost (measured on cf-ap: 37.6k notes/day → 75k rows read, ~200ms): the
+  // window scan IS the floor — an `actor_id IN (… HAVING COUNT(*) >= 5)`
+  // prefilter only adds a second pass over the same window (3.4s), and driving
+  // per actor is worse (1.4k heavy posters/day). What is wasteful is running
+  // it over the same 24h window 96 times a day, so the KV throttle below sets
+  // the cadence, not this query.
   const rows = await env.DB
     .prepare(
       `SELECT actor_id, content, COUNT(*) AS n FROM objects
