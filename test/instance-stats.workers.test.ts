@@ -328,3 +328,29 @@ describe("admin statistics endpoint", () => {
     expect(pairs(detailed.status.components)).toEqual(pairs((await getInstanceStatus(env, NOW)).components));
   });
 });
+
+/**
+ * The admin panel's row counts are ten full-table COUNT(*) in one statement
+ * (~1.7M rows read, ~4 s on cf-ap): cached in KV for 5 minutes, remeasured on
+ * `?fresh=1` / `freshRowCounts`.
+ */
+describe("admin row counts", () => {
+  it("serves the counts from KV and remeasures only when asked", async () => {
+    await seedActors();
+    await seedLocalObject("https://local.example/objects/1", new Date(Date.now() - 3600_000));
+
+    const first = await getInstanceStatsSnapshot(env, Date.now());
+    expect(first.database.rows.objects).toBe(1);
+
+    // A new row is invisible until the cache expires or the operator asks.
+    await seedLocalObject("https://local.example/objects/2", new Date(Date.now() - 1800_000));
+    const cached = await getInstanceStatsSnapshot(env, Date.now());
+    expect(cached.database.rows.objects).toBe(1);
+
+    const fresh = await getInstanceStatsSnapshot(env, Date.now(), { freshRowCounts: true });
+    expect(fresh.database.rows.objects).toBe(2);
+    // The fresh measurement rewrites the cache for the next caller.
+    const after = await getInstanceStatsSnapshot(env, Date.now());
+    expect(after.database.rows.objects).toBe(2);
+  });
+});

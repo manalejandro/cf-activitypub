@@ -665,7 +665,34 @@ function hasVectorize(env: StatsEnv): boolean {
   }
 }
 
-async function readRowCounts(db: D1Database): Promise<Record<string, number>> {
+/**
+ * Ten full-table `COUNT(*)` in one statement: ~1.7M rows read and ~4 s on
+ * cf-ap (activities 883k, objects 560k, attachments 229k). It only backs the
+ * admin panel, but that is exactly the page an administrator opens while the
+ * database is already under pressure — where a 4-second, 1.7M-row query can be
+ * what tips D1's 10-second resource window. The counts move slowly, so they
+ * are KV-cached for 5 minutes: still a real measurement, just not recomputed
+ * per request. The panel's refresh button passes `fresh` to remeasure on
+ * demand (mirroring the public status page's `?fresh=1`). A failed query is
+ * never cached (an empty object would poison the panel for the whole TTL).
+ */
+const ROW_COUNTS_KEY = "stats:row_counts";
+const ROW_COUNTS_TTL = 300;
+
+async function readRowCounts(db: D1Database, kv: KvBinding, fresh = false): Promise<Record<string, number>> {
+  if (!fresh) {
+    const cached = await kv.get(ROW_COUNTS_KEY).catch(() => null);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object" && Object.keys(parsed).length > 0) {
+          const counts: Record<string, number> = {};
+          for (const [table, value] of Object.entries(parsed)) counts[table] = num(value);
+          return counts;
+        }
+      } catch { /* fall through to the DB */ }
+    }
+  }
   const row = await db
     .prepare(
       `SELECT
@@ -684,6 +711,9 @@ async function readRowCounts(db: D1Database): Promise<Record<string, number>> {
     .catch(() => null);
   const counts: Record<string, number> = {};
   for (const [table, value] of Object.entries(row ?? {})) counts[table] = num(value);
+  if (row) {
+    await kv.put(ROW_COUNTS_KEY, JSON.stringify(counts), { expirationTtl: ROW_COUNTS_TTL }).catch(() => {});
+  }
   return counts;
 }
 
@@ -692,12 +722,16 @@ async function readRowCounts(db: D1Database): Promise<Record<string, number>> {
  * collected once and both the component list and the detailed sections are
  * built from it, so the panel never contradicts the public page.
  */
-export async function getInstanceStatsSnapshot(env: StatsEnv, now = Date.now()): Promise<InstanceStatsSnapshot> {
+export async function getInstanceStatsSnapshot(
+  env: StatsEnv,
+  now = Date.now(),
+  options: { freshRowCounts?: boolean } = {}
+): Promise<InstanceStatsSnapshot> {
   const limits = resolveLimits(env as unknown as Record<string, unknown>);
   const retention = storageRetentionLimitsFrom(limits);
   const core = await collectCore(env, now);
   const [rows, storage, relays, delivery, mediaQueue, blocks, regs, anonymous] = await Promise.all([
-    readRowCounts(env.DB),
+    readRowCounts(env.DB, env.KV, options.freshRowCounts === true),
     readStorageRetentionStats(env).catch(() => null),
     env.DB
       .prepare("SELECT state, COUNT(*) AS n FROM relays GROUP BY state")

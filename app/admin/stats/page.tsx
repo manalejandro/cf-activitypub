@@ -91,14 +91,14 @@ export default function AdminStatsPage() {
   const [failed, setFailed] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (fresh = false) => {
     const token = getToken();
     if (!token) {
       router.push("/login");
       return;
     }
     try {
-      const response = await fetch("/api/v1/admin/stats", { headers: { Authorization: `Bearer ${token}` } });
+      const response = await fetch(`/api/v1/admin/stats${fresh ? "?fresh=1" : ""}`, { headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) throw new Error(`status ${response.status}`);
       setSnapshot((await response.json()) as StatsSnapshot);
       setFailed(false);
@@ -126,7 +126,7 @@ export default function AdminStatsPage() {
         <div style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
           <Icon name="exclamation-triangle" color="var(--warning)" />
           <span>{failed ? t.status_load_error : t.admin_stats_unknown}</span>
-          <button type="button" className="btn btn-outline btn-sm" onClick={() => void load()}>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => void load(true)}>
             <Icon name="refresh" /> {t.admin_media_cache_refresh}
           </button>
         </div>
@@ -150,7 +150,7 @@ export default function AdminStatsPage() {
           <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
             {t.admin_stats_checked.replace("{time}", (checkedAt ?? new Date()).toLocaleTimeString())}
           </span>
-          <button type="button" className="btn btn-outline btn-sm" onClick={() => void load()}>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => void load(true)}>
             <Icon name="refresh" /> {t.admin_media_cache_refresh}
           </button>
         </div>

@@ -5746,6 +5746,15 @@
         "tags": [
           "Admin"
         ],
+        "parameters": [
+          {
+            "name": "fresh",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "security": [
           {
             "bearerAuth": []
