@@ -2701,6 +2701,19 @@ export async function getPublicTimeline(
        AND ${REPLY_TO_BLOCKED_SQL}`
     : "";
   const blockBinds: unknown[] = viewerId ? [viewerId, viewerId, viewerId, viewerId] : [];
+  // As soon as a SECOND range on `published` appears (the max_id/min_id pivot),
+  // the planner drops `is_local` out of the index it picks and walks every
+  // public object filtering row by row. On a relay-fed table local statuses are
+  // ~0.2% of them, so one page of 20 cost 453,517 rows read and 78 seconds
+  // (measured on cf-ap; it is what exhausted D1's 10-second resource window and
+  // failed unrelated requests with "D1 DB is overloaded"). Forcing the
+  // (visibility, is_local, published) index keeps both equality columns plus
+  // the ordered range: 74 rows, 9 ms.
+  //
+  // LOCAL ONLY. For `remote` the same hint is counterproductive (18,197 rows /
+  // 51 ms against 20 rows / 3 ms unplanned), and the federated scan has no
+  // `is_local` to seek on at all — both keep the planner's own choice.
+  const indexHint = local ? " INDEXED BY idx_objects_vis_local_pub" : "";
   if (sinceId || minId) {
     const pivot = sinceId ?? minId!;
     const pivotRow = await db
@@ -2710,7 +2723,7 @@ export async function getPublicTimeline(
     if (!pivotRow) return [];
     const rows = await db
       .prepare(
-        `SELECT o.* FROM objects o
+        `SELECT o.* FROM objects o${indexHint}
          WHERE o.visibility = 'public' ${localFilter} ${mediaFilter} ${stateFilter} ${blockFilter}
            AND ${notInFutureSql()}
            AND o.published > ?
@@ -2723,7 +2736,7 @@ export async function getPublicTimeline(
   if (maxId) {
     const rows = await db
       .prepare(
-        `SELECT o.* FROM objects o
+        `SELECT o.* FROM objects o${indexHint}
          WHERE o.visibility = 'public' ${localFilter} ${mediaFilter} ${stateFilter} ${blockFilter}
            AND ${notInFutureSql()}
            AND o.published < (SELECT published FROM objects WHERE id = ?)
@@ -2735,7 +2748,7 @@ export async function getPublicTimeline(
   }
   const rows = await db
     .prepare(
-      `SELECT o.* FROM objects o
+      `SELECT o.* FROM objects o${indexHint}
        WHERE o.visibility = 'public' ${localFilter} ${mediaFilter} ${stateFilter} ${blockFilter}
          AND ${notInFutureSql()}
        ORDER BY o.published DESC LIMIT ?`
