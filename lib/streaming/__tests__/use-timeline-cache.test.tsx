@@ -220,3 +220,83 @@ describe("useTimelineCache tab switching", () => {
     expect(getTimelineCache<{ id: string }>("local")?.items.map((s) => s.id)).toEqual(["L1", "L2"]);
   });
 });
+
+// A fetch whose resolution the test controls, one deferred per call (in order).
+type Page = { items: { id: string }[]; hasMore: boolean };
+let gatedCalls: Array<(page: Page) => void> = [];
+
+function gatedFetchPage(): Promise<Page> {
+  return new Promise<Page>((resolve) => {
+    gatedCalls.push(resolve);
+  });
+}
+
+function GatedApp() {
+  const [key, setKey] = useState("local");
+  const { statuses } = useTimelineCache<{ id: string }>(key, gatedFetchPage, {
+    refetchOnMount: true,
+  });
+  return (
+    <div>
+      <button onClick={() => setKey("federated")}>go-federated</button>
+      {statuses.map((s) => (
+        <div key={s.id} data-testid={`st-${s.id}`}>
+          {s.id}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+describe("useTimelineCache cancelled fetches", () => {
+  beforeEach(() => {
+    gatedCalls = [];
+  });
+
+  /**
+   * Regression: switching local → federated while the local feed was still
+   * closing a pagination gap merged the local page into the federated feed
+   * (the gap loop `break`s on cancel and then fell through to `setStatuses`),
+   * and wrote the federated items into the local cache entry.
+   */
+  it("drops a cancelled feed's gap page instead of merging it into the new feed", async () => {
+    cacheLocal();
+    cacheFederated();
+    render(<GatedApp />);
+
+    // Call 0: the local background refetch. Its page does not reach the cached
+    // window, so the hook starts closing the gap (call 1) and awaits it — the
+    // merge only happens once that page lands.
+    await act(async () => {});
+    await act(async () => {
+      gatedCalls[0]({ items: [{ id: "L9" }], hasMore: true });
+    });
+    // The gap page is now in flight (call index 1).
+    expect(gatedCalls.length).toBe(2);
+
+    // Switch feeds with the gap page still in flight, then resolve it: it
+    // belongs to the local feed and must go nowhere.
+    await act(async () => {
+      screen.getByText("go-federated").click();
+    });
+    expect(await screen.findByTestId("st-F1")).toBeTruthy();
+    await act(async () => {
+      gatedCalls[1]({ items: [{ id: "L8" }, { id: "L1" }], hasMore: true });
+    });
+    // Call 2 is the federated feed's own page.
+    await act(async () => {
+      gatedCalls[2]({ items: [{ id: "F1" }, { id: "F2" }], hasMore: false });
+    });
+
+    expect(screen.queryByTestId("st-L8")).toBeNull();
+    expect(screen.queryByTestId("st-L9")).toBeNull();
+    expect(screen.queryByTestId("st-F1")).toBeTruthy();
+    expect(screen.queryByTestId("st-F2")).toBeTruthy();
+
+    const federated = getTimelineCache<{ id: string }>("federated")?.items.map((s) => s.id) ?? [];
+    expect(federated.filter((id) => id.startsWith("L"))).toEqual([]);
+    // The cancelled run must not write the other feed's items into its own
+    // entry either: the local cache keeps exactly what it had.
+    expect(getTimelineCache<{ id: string }>("local")?.items.map((s) => s.id)).toEqual(["L1", "L2"]);
+  });
+});

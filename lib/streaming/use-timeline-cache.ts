@@ -213,6 +213,7 @@ export function useTimelineCache<T extends { id: string; created_at?: string }>(
       if (cancelled) return;
       // From this point on `statuses` belongs to the new key, so the cache-sync
       // effect may write it under the new key (and must not under the old one).
+      const wasLoadedKey = loadedKeyRef.current;
       loadedKeyRef.current = key;
       const resetOnEntry = optionsRef.current.resetScrollOnEntry === true;
       const tabSwitch = prevKeyRef.current !== key;
@@ -220,10 +221,14 @@ export function useTimelineCache<T extends { id: string; created_at?: string }>(
       // could otherwise drop the last status/scroll update, and events that
       // arrive during the transition would have nowhere to go. Skip the scroll
       // write when the window is still at the top so we don't clobber a
-      // remembered offset with 0.
-      if (tabSwitch && loadedKeyRef.current === prevKeyRef.current) {
+      // remembered offset with 0. (`wasLoadedKey`, not `loadedKeyRef`: that one
+      // was just reassigned, so the condition could never hold.)
+      if (tabSwitch && wasLoadedKey === prevKeyRef.current) {
         const prevEntry = getTimelineCache<T>(prevKeyRef.current);
-        if (prevEntry) {
+        // Never overwrite a populated entry with an empty feed: the load we are
+        // leaving may still be in flight, in which case `statuses` says nothing
+        // about what that feed holds.
+        if (prevEntry && (statusesRef.current.length > 0 || prevEntry.ready !== true)) {
           setTimelineCache(prevKeyRef.current, {
             ...prevEntry,
             items: statusesRef.current,
@@ -233,6 +238,11 @@ export function useTimelineCache<T extends { id: string; created_at?: string }>(
             cursor: cursorRef.current ?? prevEntry.cursor ?? null,
           }, cacheMaxItemsRef.current);
         }
+        // Any page still in flight belongs to the feed we left: `loadMore`
+        // drops it on its key check, but its flags would otherwise stay set —
+        // a spinner on the new feed and pagination blocked until it resolved.
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
       }
       prevKeyRef.current = key;
       const cached = getTimelineCache<T>(key);
@@ -339,7 +349,12 @@ export function useTimelineCache<T extends { id: string; created_at?: string }>(
           if (gap && !(onDeferred && scrolledAway)) {
             for (let page = 0; page < MAX_GAP_PAGES; page++) {
               const next = await fetchPageRef.current(fetchedOldest!);
-              if (cancelled || next.items.length === 0) break;
+              // A feed switch mid-gap must ABORT, not fall through: `statuses`
+              // now belongs to the new feed, so merging these items would mix
+              // the two timelines (and `fetchPageRef` has already been swapped
+              // to the new feed's fetcher, so the next page is not even ours).
+              if (cancelled) return;
+              if (next.items.length === 0) break;
               fetched = [...fetched, ...next.items];
               const nextOldest = next.items[next.items.length - 1]?.id ?? null;
               if (!nextOldest) break;
@@ -349,6 +364,7 @@ export function useTimelineCache<T extends { id: string; created_at?: string }>(
               if (feedIds.has(nextOldest)) break;
             }
           }
+          if (cancelled) return;
           if (optionsRef.current.replaceOnRefetch === true || gap) {
             // Pagination resumes below the deepest page fetched here (the rest
             // of the gap, when the bound above stopped early).
@@ -370,6 +386,11 @@ export function useTimelineCache<T extends { id: string; created_at?: string }>(
             }
           }
           setStatuses((prev) => {
+            // Second line of defence: the updater runs later, during the
+            // commit, and by then the feed may have switched — `prev` would be
+            // the OTHER feed's items and the cache write below would poison
+            // this key's entry with them.
+            if (cancelled || keyRef.current !== key) return prev;
             // Merge with the canonical newest-first order and never let an
             // empty result wipe a cached feed (a transient failure returns an
             // empty page; the cached items must survive it). Membership feeds
