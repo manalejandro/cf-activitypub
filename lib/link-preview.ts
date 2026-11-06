@@ -41,6 +41,7 @@ import {
   markLinkPreviewFailed,
   markPreviewCardFailed,
   mediaCacheId,
+  purgeStaleLinkPreviewJobs,
   updateObjectCardSnapshots,
   upsertPreviewCard,
   type PreviewCardInput,
@@ -126,6 +127,15 @@ const RETRY_HOURS = [1, 6, 24];
 const NEGATIVE_CACHE_HOURS = 24 * 7;
 const MAX_QUEUE_BUDGET_MS = 25_000;
 const LOCK_TTL_SECONDS = 60;
+/**
+ * A queued crawl that has been due for this long without running is dropped:
+ * the status is out of every timeline by then, so the card would never be seen,
+ * and keeping it starves the jobs that are still worth crawling. Retries
+ * scheduled in the future are not affected (their `next_attempt_at` is ahead).
+ */
+const STALE_AFTER_HOURS = 6;
+/** Bounded per tick so draining a large backlog can never be one huge write. */
+const STALE_PURGE_BATCH = 2_000;
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"{}|\\^`[\]]+/g;
 
@@ -1060,6 +1070,17 @@ export async function processLinkPreviewQueue(
   const limits = normalizeLimits(rawLimits);
   if (!limits.enabled) return 0;
   const budgetMs = options.budgetMs ?? MAX_QUEUE_BUDGET_MS;
+
+  // Clear the hopeless tail before spending the crawl budget: jobs that have
+  // been due for hours are never going to produce a card anybody sees, and
+  // they sit at the front of the FIFO queue starving the fresh ones (which is
+  // how the queue grew to 99k rows on cf-ap).
+  try {
+    const purged = await purgeStaleLinkPreviewJobs(bindings.DB, STALE_AFTER_HOURS, STALE_PURGE_BATCH);
+    if (purged > 0) console.log(`[link-preview] dropped ${purged} crawl job(s) due over ${STALE_AFTER_HOURS}h ago`);
+  } catch (err) {
+    console.error("[link-preview] stale job purge failed", err);
+  }
 
   const jobs = await listLinkPreviewQueue(bindings.DB, options.limit ?? limits.fetchBatch);
   const deadline = Date.now() + budgetMs;

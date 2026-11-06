@@ -5277,8 +5277,15 @@ export async function enqueueLinkPreview(db: D1Database, objectId: string): Prom
 
 /** Due crawl jobs, oldest attempt first. */
 export async function listLinkPreviewQueue(db: D1Database, limit: number): Promise<LinkPreviewQueueEntry[]> {
+  // `next_attempt_at` is DB-shape (`datetime('now')` default, `dbTimestamp` on
+  // retries), so the column must be compared bare: wrapping it in `datetime()`
+  // defeats `idx_link_preview_queue_due` and turns every tick into a full scan
+  // plus a temp B-tree sort of the whole queue. Measured on cf-ap with a 99k
+  // backlog: 198,349 rows read per call, once a minute (~285M rows/day) —
+  // enough on its own to exhaust D1's 10-second resource window and fail
+  // unrelated requests with "D1 DB is overloaded". Indexed: 20 rows, 1ms.
   const rows = await db
-    .prepare("SELECT * FROM link_preview_queue WHERE datetime(next_attempt_at) <= datetime('now') ORDER BY datetime(next_attempt_at) ASC LIMIT ?")
+    .prepare("SELECT * FROM link_preview_queue WHERE next_attempt_at <= datetime('now') ORDER BY next_attempt_at ASC LIMIT ?")
     .bind(limit)
     .all<Row>();
   return (rows.results ?? []).map((r) => ({
@@ -5288,6 +5295,27 @@ export async function listLinkPreviewQueue(db: D1Database, limit: number): Promi
     nextAttemptAt: (r.next_attempt_at as string) ?? "",
     createdAt: (r.created_at as string) ?? "",
   }));
+}
+
+/**
+ * Drop crawl jobs that fell this far behind and were never processed. A card
+ * for a hours-old status is worthless (the post is out of every timeline) and,
+ * left in place, those jobs sit at the front of the FIFO queue and starve the
+ * fresh ones — the backlog then grows until the scan itself melts the DB.
+ * Bounded per call and index-driven (the inner select rides the due index);
+ * jobs whose retry is scheduled in the FUTURE are untouched.
+ */
+export async function purgeStaleLinkPreviewJobs(db: D1Database, hours: number, limit: number): Promise<number> {
+  const res = await db
+    .prepare(
+      `DELETE FROM link_preview_queue WHERE object_id IN (
+         SELECT object_id FROM link_preview_queue
+         WHERE next_attempt_at <= datetime('now', ?)
+         LIMIT ?)`
+    )
+    .bind(`-${Math.max(1, Math.floor(hours))} hours`, Math.max(1, Math.floor(limit)))
+    .run();
+  return res.meta.changes ?? 0;
 }
 
 export async function deleteLinkPreviewQueue(db: D1Database, objectId: string): Promise<void> {

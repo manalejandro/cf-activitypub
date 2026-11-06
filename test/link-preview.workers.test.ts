@@ -14,7 +14,8 @@ const federation = vi.hoisted(() => ({
 
 vi.mock("@/lib/activitypub/federation", () => federation);
 
-import { enqueueLinkPreview, getActorById, getObjectById, listLinkPreviewQueue } from "@/lib/db";
+import { enqueueLinkPreview, getActorById, getObjectById, listLinkPreviewQueue, purgeStaleLinkPreviewJobs } from "@/lib/db";
+import { dbTimestamp } from "@/lib/dates";
 import {
   applyYouTubeFallback,
   applyInstagramFallback,
@@ -225,17 +226,60 @@ describe("link preview queue", () => {
     expect(attached).toEqual(["https://remote.example/objects/1"]);
   });
 
-  it("treats an ISO-8601 crawl backoff timestamp as due", async () => {
+  it("treats a retry backoff timestamp as due", async () => {
     await seedObject("https://remote.example/objects/1", '<a href="https://news.example/story">a</a>');
     await enqueueLinkPreview(db, "https://remote.example/objects/1");
-    // markLinkPreviewFailed writes ISO-8601; the enqueue default is SQLite
-    // format. Raw string comparison skipped same-day retries entirely.
+    // `next_attempt_at` has ONE shape (DB, `datetime('now')` / `dbTimestamp`),
+    // which is what lets the due query compare the column bare and ride
+    // idx_link_preview_queue_due. Wrapping it in `datetime()` to tolerate a
+    // mixed shape cost a full scan + sort of the whole queue every minute
+    // (198k rows read per tick on a 99k backlog). Legacy ISO rows are healed by
+    // upgrade-schema's `backfill:dates_normalized`.
     await db.prepare("UPDATE link_preview_queue SET next_attempt_at = ?")
-      .bind(new Date(Date.now() - 60_000).toISOString())
+      .bind(dbTimestamp(Date.now() - 60_000))
       .run();
 
     const jobs = await listLinkPreviewQueue(db, 10);
     expect(jobs.map((j) => j.objectId)).toContain("https://remote.example/objects/1");
+  });
+
+  it("drops jobs due for hours, keeps fresh ones and future retries", async () => {
+    for (const n of ["stale", "fresh", "retry"]) {
+      await seedObject(`https://remote.example/objects/${n}`, '<a href="https://news.example/story">a</a>');
+      await enqueueLinkPreview(db, `https://remote.example/objects/${n}`);
+    }
+    const setDue = (id: string, ms: number) =>
+      db.prepare("UPDATE link_preview_queue SET next_attempt_at = ? WHERE object_id = ?")
+        .bind(dbTimestamp(Date.now() + ms), `https://remote.example/objects/${id}`)
+        .run();
+    await setDue("stale", -7 * 3_600_000);   // due 7h ago: never crawled, hopeless
+    await setDue("fresh", -60_000);          // due a minute ago: worth crawling
+    await setDue("retry", 6 * 3_600_000);    // backoff scheduled ahead: untouched
+
+    expect(await purgeStaleLinkPreviewJobs(db, 6, 100)).toBe(1);
+
+    const left = await db
+      .prepare("SELECT object_id FROM link_preview_queue ORDER BY object_id")
+      .all<{ object_id: string }>();
+    expect(left.results.map((r) => r.object_id.split("/").pop())).toEqual(["fresh", "retry"]);
+    // Only the fresh one is due; the purge is bounded per call.
+    expect((await listLinkPreviewQueue(db, 10)).map((j) => j.objectId)).toEqual([
+      "https://remote.example/objects/fresh",
+    ]);
+    expect(await purgeStaleLinkPreviewJobs(db, 6, 1)).toBe(0);
+  });
+
+  it("the cron stage purges a starved job instead of crawling it", async () => {
+    await seedObject("https://remote.example/objects/1", '<a href="https://news.example/story">a</a>');
+    await enqueueLinkPreview(db, "https://remote.example/objects/1");
+    await db.prepare("UPDATE link_preview_queue SET next_attempt_at = ?")
+      .bind(dbTimestamp(Date.now() - 9 * 3_600_000))
+      .run();
+
+    expect(await processLinkPreviewQueue(bindings, LIMITS, "local.example")).toBe(0);
+    expect(federation.safeFetch).not.toHaveBeenCalled();
+    const left = await db.prepare("SELECT COUNT(*) AS n FROM link_preview_queue").first<{ n: number }>();
+    expect(left?.n).toBe(0);
   });
 
   it("reuses a fresh card for other statuses without hitting the origin again", async () => {
