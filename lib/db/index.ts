@@ -2734,15 +2734,27 @@ export async function getPublicTimeline(
     return rows.results.map(rowToObject);
   }
   if (maxId) {
+    // Resolve the pivot, then collapse the two `published` bounds into ONE.
+    // With `< pivot` next to `notInFutureSql()`'s `<= now` the planner cannot
+    // know which is tighter at plan time: it keeps the loose one as the index
+    // range and filters the other row by row, walking every public object from
+    // now down to the cursor (18,295 rows read per page on cf-ap, and the deep
+    // local cursors behind the 78-second pages). `MIN(?, now)` is evaluated
+    // once and stays index-usable (measured: 40 rows, 3 ms). An unresolvable
+    // pivot returns an empty page, like the min_id branch and Mastodon.
+    const pivotRow = await db
+      .prepare("SELECT published FROM objects WHERE id = ?")
+      .bind(maxId)
+      .first<{ published: string }>();
+    if (!pivotRow?.published) return [];
     const rows = await db
       .prepare(
         `SELECT o.* FROM objects o${indexHint}
          WHERE o.visibility = 'public' ${localFilter} ${mediaFilter} ${stateFilter} ${blockFilter}
-           AND ${notInFutureSql()}
-           AND o.published < (SELECT published FROM objects WHERE id = ?)
+           AND o.published < MIN(?, ${NOT_FUTURE_NOW_SQL})
          ORDER BY o.published DESC LIMIT ?`
       )
-      .bind(...blockBinds, maxId, limit)
+      .bind(...blockBinds, pivotRow.published, limit)
       .all<Row>();
     return rows.results.map(rowToObject);
   }
