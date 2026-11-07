@@ -182,3 +182,48 @@ describe("the Guardian's tools", () => {
     expect(snapshot.registrations_pending).toBe(0);
   });
 });
+
+/**
+ * `search_statuses` scans in two steps: the unanchored LIKE walks every object
+ * of the window reading `content`, so the author join must NOT sit inside that
+ * scan (measured on cf-ap: 17.7 s with the join against 6.1 s without, for a
+ * search with no match — long enough to exhaust D1's 10-second window).
+ */
+describe("search_statuses (two-step scan)", () => {
+  async function seedObject(id: string, actorId: string, content: string, hoursAgo = 0): Promise<void> {
+    const published = new Date(Date.now() - hoursAgo * 3_600_000).toISOString();
+    await db
+      .prepare(
+        `INSERT INTO objects (id, type, actor_id, content, visibility, is_local, raw, published, updated_at)
+         VALUES (?, 'Note', ?, ?, 'public', 1, '{}', ?, ?)`
+      )
+      .bind(id, actorId, content, published, published)
+      .run();
+  }
+
+  it("returns matches with their authors resolved in the second step", async () => {
+    const ana = `${BASE}/users/ana`;
+    const bei = `${BASE}/users/bei`;
+    await seedActor(ana, "user", "tok-ana");
+    await seedActor(bei, "user", "tok-bei");
+    await seedObject(`${BASE}/objects/s1`, ana, "<p>buy cheap watches now</p>");
+    await seedObject(`${BASE}/objects/s2`, bei, "<p>another cheap offer</p>", 5);
+    // Ten days old: beyond the tool's 7-day cap, so no window can reach it.
+    await seedObject(`${BASE}/objects/s3`, ana, "<p>an innocent post</p>", 240);
+    await seedObject(`${BASE}/objects/s4`, ana, "<p>innocent and recent</p>");
+
+    const tools = buildGuardianTools(env);
+    const search = tools.search_statuses.execute as unknown as (input: unknown) => Promise<
+      { id: string; author: string; text: string }[]
+    >;
+
+    const hits = await search({ query: "cheap", days: 3, limit: 10 });
+    expect(hits.map((h) => h.id)).toEqual([`${BASE}/objects/s1`, `${BASE}/objects/s2`]);
+    expect(hits.map((h) => h.author)).toEqual(["@ana", "@bei"]);
+    expect(hits[0].text).toContain("buy cheap watches");
+
+    // The window is honoured: only the recent "innocent" post comes back.
+    const windowed = await search({ query: "innocent", days: 3, limit: 10 });
+    expect(windowed.map((h) => h.id)).toEqual([`${BASE}/objects/s4`]);
+  });
+});

@@ -1700,11 +1700,14 @@ async function executeScheduled(env: Env): Promise<void> {
 
   // Abandoned user uploads: `media/<user>/…` R2 keys never attached to a
   // status (discarded composer drafts). Cursor-bounded passes, a 31-day
-  // minimum age and the scheduled-posts guard live in the sweeper; a few runs
-  // a day is plenty. Independent of the media cache — uploads happen whether
-  // or not caching is enabled.
+  // minimum age and the scheduled-posts guard live in the sweeper. Candidates
+  // are a month old by definition, so one pass a day is ample — and a pass that
+  // finds any costs a 267k-row reference scan (measured on cf-ap, ~1.1 s), the
+  // price of an unanchored `LIKE '%/api/media/%'` over attachments and actors.
+  // Independent of the media cache — uploads happen whether or not caching is
+  // enabled.
   await setStage("upload-orphans");
-  if (await schedule.every("upload-orphans", 360)) {
+  if (await schedule.every("upload-orphans", 1440)) {
     try {
       const swept = await sweepOrphanUploads({ DB: env.DB, R2: env.R2 });
       if (swept.deleted > 0) {

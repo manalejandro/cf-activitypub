@@ -99,9 +99,11 @@ export async function sweepOrphanUploads(
   const candidates = listed.objects.filter((o) => o.uploaded.getTime() < cutoff);
   if (candidates.length === 0) return { scanned: listed.objects.length, deleted: 0 };
 
-  // Every /api/media/ reference in one pass (the sweep is cursor-bounded and
-  // runs a few times a day at most, so one UNION scan per pass is cheap
-  // compared to a probe per key).
+  // Every /api/media/ reference in one pass. It cannot be indexed (an
+  // unanchored `LIKE '%/api/media/%'` over attachments + actors + emoji:
+  // 267,183 rows read, ~1.1 s on cf-ap), but it is still far cheaper than a
+  // probe per key, and the early return above means it only runs for passes
+  // that actually have month-old candidates.
   const rows = await DB.prepare(
     `SELECT url AS u FROM attachments WHERE url LIKE '%/api/media/%'
      UNION ALL SELECT avatar_url FROM actors WHERE avatar_url LIKE '%/api/media/%'

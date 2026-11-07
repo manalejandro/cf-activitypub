@@ -201,20 +201,27 @@ export function buildGuardianTools(env: GuardianToolEnv) {
 
     search_statuses: tool({
       description:
-        "Search recent statuses by text (substring, case-insensitive) or by hashtag. Returns the newest matches with their author and engagement.",
+        "Search recent statuses by text (substring, case-insensitive) or by hashtag. Returns the newest matches with their author and engagement. Expensive: a substring search cannot use an index, so keep `days` as small as the question allows.",
       inputSchema: z.object({
         query: z.string().min(2),
-        days: z.number().int().min(1).max(30).default(7),
+        days: z.number().int().min(1).max(7).default(3),
         limit: z.number().int().min(1).max(MAX_LIMIT).default(10),
       }),
       execute: async ({ query, days, limit }) => {
         // D1 rejects LIKE patterns over 50 characters, and a bare `%` would
         // scan the whole table: keep it a bounded substring.
         const needle = `%${query.trim().slice(0, 40).replace(/[%_\\]/g, "\\$&")}%`;
-        const rows = await env.DB.prepare(
-          `SELECT o.id, o.content, o.published, o.visibility, o.engagement, o.type,
-                  a.username, a.domain, a.is_local, a.suspended
-             FROM objects o JOIN actors a ON a.id = o.actor_id
+        // Two steps, and a short window. The LIKE reads the `content` of every
+        // object in the window (the scan walks `idx_objects_published`
+        // newest-first and only stops early at LIMIT when something matches),
+        // and joining `actors` inside it probed the author of every candidate:
+        // measured on cf-ap with no match, 7 days cost 114,867 rows / 6.1 s
+        // bare and 17.7 s with the join — long enough to exhaust D1's
+        // 10-second resource window and fail unrelated traffic. So: ids first,
+        // then one indexed lookup for the authors of the (≤ limit) hits.
+        const hits = await env.DB.prepare(
+          `SELECT o.id, o.content, o.published, o.visibility, o.engagement, o.type, o.actor_id
+             FROM objects o
             WHERE o.content LIKE ? ESCAPE '\\'
               AND o.published >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
             ORDER BY o.published DESC
@@ -222,14 +229,32 @@ export function buildGuardianTools(env: GuardianToolEnv) {
         )
           .bind(needle, `-${days} days`, limit)
           .all<Record<string, unknown>>();
-        return (rows.results ?? []).map((r) => ({
-          id: r.id as string,
-          author: `@${r.username}${r.is_local ? "" : `@${r.domain}`}${r.suspended ? " (suspended)" : ""}`,
-          published: r.published as string,
-          visibility: r.visibility as string,
-          engagement: Number(r.engagement ?? 0),
-          text: excerpt(r.content as string | null, 240),
-        }));
+        const rows = hits.results ?? [];
+        const authorIds = [...new Set(rows.map((r) => String(r.actor_id ?? "")).filter(Boolean))];
+        const authors = new Map<string, { username: string; domain: string | null; is_local: number; suspended: number }>();
+        if (authorIds.length > 0) {
+          const found = await env.DB
+            .prepare(
+              `SELECT id, username, domain, is_local, suspended FROM actors
+               WHERE id IN (${authorIds.map(() => "?").join(", ")})`
+            )
+            .bind(...authorIds)
+            .all<{ id: string; username: string; domain: string | null; is_local: number; suspended: number }>();
+          for (const a of found.results ?? []) authors.set(a.id, a);
+        }
+        return rows.map((r) => {
+          const a = authors.get(String(r.actor_id ?? ""));
+          return {
+            id: r.id as string,
+            author: a
+              ? `@${a.username}${a.is_local ? "" : `@${a.domain}`}${a.suspended ? " (suspended)" : ""}`
+              : "(author not cached)",
+            published: r.published as string,
+            visibility: r.visibility as string,
+            engagement: Number(r.engagement ?? 0),
+            text: excerpt(r.content as string | null, 240),
+          };
+        });
       },
     }),
 
