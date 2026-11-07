@@ -25,6 +25,7 @@ import {
   type MediaCacheLimits,
 } from "@/lib/media/remote-cache";
 import { enqueueMediaCache, getMediaCacheStats, repairMediaCacheReferences, cachedMediaUrl, listOrphanMediaCache, listMediaCacheQueue, upsertRemoteActor } from "@/lib/db";
+import { dbTimestamp } from "@/lib/dates";
 import { resolveLimits } from "@/lib/constants";
 import { recordMediaHit, flushMediaHits, mediaHitWindowDays, __resetMediaHits, __resetMediaHitWindow } from "@/lib/media/hits";
 
@@ -796,12 +797,17 @@ describe("remote media cache", () => {
     expect(new TextDecoder().decode(stored)).not.toContain("CameraCo");
   });
 
-  it("treats an ISO-8601 backoff timestamp as due (mixed date formats)", async () => {
+  it("treats a DB-shape backoff timestamp as due (the queue compares raw)", async () => {
     await enqueueMediaCache(db, SRC, "attachment", ATTACH);
-    // markMediaCacheFailed writes ISO-8601 while enqueue writes SQLite format;
-    // comparing the raw strings made same-day backoffs wait until tomorrow.
+    // `media_cache.next_attempt_at` holds ONE shape (DB: `datetime('now')` on
+    // enqueue, `dbTimestamp` via `plusHours` on backoff), which is what lets the
+    // queue compare it raw and ride idx_media_cache_queue (status,
+    // next_attempt_at). Wrapping the column in `datetime()` to tolerate an ISO
+    // straggler hid that index and scanned the table twice per tick: 2,662 rows
+    // read per call against 12. Legacy ISO rows are healed by upgrade-schema's
+    // `backfill:dates_normalized`.
     await db.prepare("UPDATE media_cache SET next_attempt_at = ? WHERE source_url = ?")
-      .bind(new Date(Date.now() - 60_000).toISOString(), SRC)
+      .bind(dbTimestamp(Date.now() - 60_000), SRC)
       .run();
     federation.safeFetch.mockResolvedValue(okResponse(new Uint8Array([1]), "image/png"));
 

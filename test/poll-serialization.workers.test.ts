@@ -8,7 +8,7 @@ beforeAll(async () => {
 });
 
 import { loadSerializedPolls } from "@/lib/mastodon/serializers";
-import { createPoll, createPollVotes, getPollById, getPollOptions, listRemotePollsForRefresh } from "@/lib/db";
+import { createPoll, createPollVotes, getPollById, getPollOptions, listPollsToNotify, listRemotePollsForRefresh } from "@/lib/db";
 import { applyPollToNoteFromDb, refreshPollFromQuestion } from "@/lib/activitypub/polls";
 import { getQuotesByIds } from "@/lib/mastodon/quote";
 import { buildNote } from "@/lib/activitypub/utils";
@@ -310,6 +310,31 @@ describe("listRemotePollsForRefresh", () => {
     const due = await listRemotePollsForRefresh(db, 10);
     expect(due.map((p) => p.id)).toEqual(["p-fresh"]);
   });
+
+  /**
+   * Plan pin (mirrors `listRemotePollsForRefresh` — update both together).
+   * Without `INDEXED BY` + `CROSS JOIN` the planner drives from `objects` on
+   * `is_local = 0` and walks every remote object probing for a live poll:
+   * 7,164 ms / 59,014 rows per call against 11 ms / 99 rows on cf-ap.
+   */
+  it("drives from the live polls instead of scanning every remote object", async () => {
+    const plan = await db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT p.id, p.object_id
+         FROM polls p INDEXED BY idx_polls_expires
+         CROSS JOIN objects o ON o.id = p.object_id
+         WHERE p.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           AND o.is_local = 0
+           AND o.published >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
+         ORDER BY o.published DESC LIMIT 10`
+      )
+      .all<{ detail: string }>();
+    const details = plan.results.map((r) => r.detail);
+    expect(details[0]).toContain("idx_polls_expires");
+    expect(details[1]).toContain("sqlite_autoindex_objects_1");
+    expect(details.join(" ")).not.toContain("idx_objects_local_pub_actor");
+  });
 });
 
 describe("getQuotesByIds (quoted polls)", () => {
@@ -349,5 +374,83 @@ describe("getQuotesByIds (quoted polls)", () => {
     expect(quoted?.poll?.options.map((o) => o.title)).toEqual(["A", "B"]);
     expect(quoted?.poll?.voted).toBe(true);
     expect(quoted?.poll?.own_votes).toEqual([0]);
+  });
+});
+
+describe("listPollsToNotify", () => {
+  const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const AUTHOR = "https://remote.example/users/pollauthor";
+  const VOTER = "https://remote.example/users/voter";
+
+  async function seedActor(id: string) {
+    await db
+      .prepare(
+        `INSERT INTO actors (id, username, domain, public_key_pem, private_key_pem, is_local)
+         VALUES (?, ?, ?, 'k', NULL, 0)`
+      )
+      .bind(id, id.split("/").pop()!, new URL(id).hostname)
+      .run();
+  }
+
+  async function seedPoll(pollId: string, objectId: string, expiresAt: string, publishedMs: number) {
+    await db
+      .prepare(
+        `INSERT INTO objects (id, type, actor_id, content, visibility, is_local, raw, published)
+         VALUES (?, 'Question', ?, 'poll', 'public', 0, '{}', ?)`
+      )
+      .bind(objectId, AUTHOR, iso(publishedMs))
+      .run();
+    await db
+      .prepare("INSERT INTO polls (id, object_id, expires_at, multiple, votes_count, voters_count) VALUES (?,?,?,0,0,0)")
+      .bind(pollId, objectId, expiresAt)
+      .run();
+  }
+
+  it("returns expired polls whose author was not notified yet, and only those", async () => {
+    await seedActor(AUTHOR);
+    await seedActor(VOTER);
+    await seedPoll("p-due", "https://remote.example/objects/due", iso(-3600_000), -2 * 3600_000);
+    await seedPoll("p-done", "https://remote.example/objects/done", iso(-3600_000), -2 * 3600_000);
+    // The notification row IS the idempotency marker.
+    await db
+      .prepare(
+        `INSERT INTO notifications (id, type, account_id, target_account_id, object_id)
+         VALUES ('n1', 'poll', ?, ?, 'https://remote.example/objects/done')`
+      )
+      .bind(AUTHOR, VOTER)
+      .run();
+    await seedPoll("p-live", "https://remote.example/objects/live", iso(3600_000), 0);
+    await seedPoll("p-ancient", "https://remote.example/objects/ancient", iso(-8 * 86400_000), -9 * 86400_000);
+
+    const due = await listPollsToNotify(db, 20);
+    expect(due.map((p) => p.pollId)).toEqual(["p-due"]);
+    expect(due[0]).toMatchObject({ objectId: "https://remote.example/objects/due", actorId: AUTHOR });
+  });
+
+  /**
+   * Plan pin (mirrors `listPollsToNotify` — update both together). With
+   * `datetime()` around the columns the expiry range became a full index scan,
+   * and the marker probe on `idx_notif_dedup (type, account_id, …)` walked every
+   * poll notification of the author: 182,390 rows per call, every 3 minutes.
+   */
+  it("ranges the polls by expiry and probes the marker by object_id", async () => {
+    const plan = await db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT p.id FROM polls p JOIN objects o ON o.id = p.object_id
+         WHERE p.expires_at IS NOT NULL
+           AND p.expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           AND p.expires_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-7 days')
+           AND NOT EXISTS (
+             SELECT 1 FROM notifications n INDEXED BY idx_notifications_object
+             WHERE n.object_id = o.id AND n.type = 'poll' AND n.account_id = o.actor_id
+           )
+         ORDER BY p.expires_at ASC LIMIT 20`
+      )
+      .all<{ detail: string }>();
+    const details = plan.results.map((r) => r.detail).join(" | ");
+    expect(details).toContain("idx_polls_expires (expires_at>? AND expires_at<?)");
+    expect(details).toContain("idx_notifications_object (object_id=?)");
+    expect(details).not.toContain("SCAN p");
   });
 });

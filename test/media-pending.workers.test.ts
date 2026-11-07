@@ -46,12 +46,17 @@ beforeEach(async () => {
 });
 
 async function seedObject(actorId = REMOTE_ACTOR, id = REMOTE_OBJECT): Promise<void> {
+  // `published` is bound explicitly: the column DEFAULT is `datetime('now')`
+  // (DB shape) while every production writer binds ISO-8601, and the readers
+  // compare it raw against `strftime('%Y-%m-%dT%H:%M:%fZ', …)`. Inheriting the
+  // default here would test a shape production never stores.
+  const published = new Date().toISOString();
   await db
     .prepare(
-      `INSERT INTO objects (id, type, actor_id, content, visibility, is_local, raw)
-       VALUES (?, 'Note', ?, '<p>hi</p>', 'public', 0, '{}')`
+      `INSERT INTO objects (id, type, actor_id, content, visibility, is_local, raw, published, updated_at)
+       VALUES (?, 'Note', ?, '<p>hi</p>', 'public', 0, '{}', ?, ?)`
     )
-    .bind(id, actorId)
+    .bind(id, actorId, published, published)
     .run();
 }
 

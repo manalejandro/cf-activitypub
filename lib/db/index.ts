@@ -4779,6 +4779,16 @@ export async function createPollVotes(
 /**
  * Active remote polls worth refreshing in the background (the origin's
  * document is the only source of total remote votes). Recent statuses first.
+ *
+ * Both timestamp columns are ISO-shaped (the `lib/dates.ts` contract), so they
+ * compare bare and ride their indexes. Wrapping them in `datetime()` — which is
+ * what tolerating a mixed shape would cost — defeated `idx_polls_expires` AND
+ * let the planner drive from `objects` on `is_local = 0`, i.e. walk every
+ * remote object probing for a live poll: 7,164 ms / 59,014 rows read per call,
+ * every 3 minutes (~8.5M rows/day). `CROSS JOIN` locks the join order (SQLite
+ * never reorders across it) so the live polls drive — they are inherently few,
+ * 36 of 2,095 rows on cf-ap, because polls expire — and `objects` is probed by
+ * primary key: 11 ms / 99 rows.
  */
 export async function listRemotePollsForRefresh(
   db: D1Database,
@@ -4786,10 +4796,12 @@ export async function listRemotePollsForRefresh(
 ): Promise<{ id: string; objectId: string }[]> {
   const rows = await db
     .prepare(
-      `SELECT p.id, p.object_id FROM polls p JOIN objects o ON o.id = p.object_id
-       WHERE o.is_local = 0
-         AND datetime(p.expires_at) > datetime('now')
-         AND datetime(o.published) >= datetime('now', '-7 days')
+      `SELECT p.id, p.object_id
+       FROM polls p INDEXED BY idx_polls_expires
+       CROSS JOIN objects o ON o.id = p.object_id
+       WHERE p.expires_at > ${NOT_FUTURE_NOW_SQL}
+         AND o.is_local = 0
+         AND o.published >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
        ORDER BY o.published DESC LIMIT ?`
     )
     .bind(limit)
@@ -5573,7 +5585,7 @@ export async function cleanupOrphanPreviewCards(db: D1Database, limit: number): 
            -- A live negative cache is an orphan by definition: keep it until
            -- its window expires, or every status linking to the dead URL
            -- would re-crawl the origin.
-           AND NOT (pc.status = 'failed' AND datetime(pc.next_attempt_at) > datetime('now'))
+           AND NOT (pc.status = 'failed' AND pc.next_attempt_at > datetime('now'))
          LIMIT ?
        )`
     )
@@ -5732,7 +5744,12 @@ export async function enqueueMediaCache(
 export async function listMediaCacheQueue(db: D1Database, limit: number): Promise<MediaCacheEntry[]> {
   const freshCount = Math.max(1, Math.ceil(limit * 0.7));
   const oldestCount = Math.max(0, limit - freshCount);
-  const due = "status IN ('pending', 'failed') AND datetime(next_attempt_at) <= datetime('now')";
+  // `next_attempt_at` is DB-shape and `idx_media_cache_queue (status,
+  // next_attempt_at)` exists for exactly this predicate — but only if the column
+  // is compared bare. Wrapping it in `datetime()` hid the index and scanned the
+  // whole table twice (one scan per UNION ALL branch) every minute: 2,662 rows
+  // read per call against 12 (~3.8M rows/day). NULL stays undue either way.
+  const due = "status IN ('pending', 'failed') AND next_attempt_at <= datetime('now')";
   const rows = await db
     .prepare(
       `SELECT * FROM (SELECT * FROM media_cache WHERE ${due} ORDER BY rowid DESC LIMIT ?)
@@ -5972,7 +5989,7 @@ export async function releaseStaleMediaPendingObjects(
   const rows = await db
     .prepare(
       `SELECT id FROM objects
-       WHERE media_pending = 1 AND datetime(published) < datetime('now', ?)
+       WHERE media_pending = 1 AND published < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
        ORDER BY published ASC LIMIT ?`
     )
     .bind(window, limit)
@@ -6280,6 +6297,15 @@ export async function deletePendingMediaCache(db: D1Database): Promise<number> {
  * itself is the marker, so the pass is idempotent (the cron runs it every
  * tick). The 7-day bound keeps the ordered scan on `idx_polls_expires` short
  * and deliberately skips history: a deploy never spams voters with old polls.
+ *
+ * Both timestamp columns are ISO, so they compare **bare**: `datetime()` around
+ * them turned the range into a full index scan. And the marker probe is forced
+ * onto `idx_notifications_object` — left to itself the planner picks the
+ * covering `idx_notif_dedup (type, account_id, …)`, whose leading columns match
+ * every poll notification of that author, so each probe walked them all. In the
+ * steady state every candidate is already notified, so the pass walks all of
+ * them to return nothing: 66 ms / 182,390 rows per call, every 3 minutes
+ * (~87M rows/day). With the range and the probe indexed: 16 ms / 1,264 rows.
  */
 export async function listPollsToNotify(
   db: D1Database,
@@ -6291,10 +6317,10 @@ export async function listPollsToNotify(
        FROM polls p
        JOIN objects o ON o.id = p.object_id
        WHERE p.expires_at IS NOT NULL
-         AND datetime(p.expires_at) <= datetime('now')
-         AND datetime(p.expires_at) >= datetime('now', '-7 days')
+         AND p.expires_at <= ${NOT_FUTURE_NOW_SQL}
+         AND p.expires_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
          AND NOT EXISTS (
-           SELECT 1 FROM notifications n
+           SELECT 1 FROM notifications n INDEXED BY idx_notifications_object
            WHERE n.object_id = o.id AND n.type = 'poll' AND n.account_id = o.actor_id
          )
        ORDER BY p.expires_at ASC
@@ -6492,12 +6518,12 @@ export async function listInstances(
       where.push("i.suspended = 1");
       break;
     case "dormant":
-      where.push("datetime(i.last_seen_at) < datetime(?) AND i.suspended = 0");
+      where.push("i.last_seen_at < ? AND i.suspended = 0");
       binds.push(dormantCutoff);
       break;
     case "ok":
       where.push(
-        "i.unavailable = 0 AND i.suspended = 0 AND datetime(i.last_seen_at) >= datetime(?)",
+        "i.unavailable = 0 AND i.suspended = 0 AND i.last_seen_at >= ?",
         "NOT EXISTS (SELECT 1 FROM instance_domain_blocks b WHERE b.domain = i.domain)"
       );
       binds.push(dormantCutoff);
@@ -6740,9 +6766,13 @@ export async function listInstancesDueForRefresh(
 ): Promise<string[]> {
   const rows = await db
     .prepare(
+      // `instances.*_at` are ISO and the cutoff is bound as ISO, so both sides
+      // compare bare and ride `idx_instances_next_refresh`: `datetime()` around
+      // them scanned the whole registry plus a temp B-tree for the ORDER BY
+      // (2,542 rows per call, every 5 minutes) instead of seeking 1.
       `SELECT domain FROM instances
-       WHERE next_refresh_at IS NOT NULL AND datetime(next_refresh_at) <= datetime(?) AND suspended = 0
-       ORDER BY datetime(next_refresh_at) LIMIT ?`
+       WHERE next_refresh_at IS NOT NULL AND next_refresh_at <= ? AND suspended = 0
+       ORDER BY next_refresh_at LIMIT ?`
     )
     .bind(now.toISOString(), limit)
     .all<{ domain: string }>();

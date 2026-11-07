@@ -748,7 +748,7 @@ export async function getInstanceStatsSnapshot(
       .first<Record<string, number | string | null>>(),
     env.DB
       .prepare(
-        "SELECT COUNT(*) AS n FROM media_cache WHERE status IN ('pending', 'failed') AND datetime(next_attempt_at) <= datetime('now')"
+        "SELECT COUNT(*) AS n FROM media_cache WHERE status IN ('pending', 'failed') AND next_attempt_at <= datetime('now')"
       )
       .first<{ n: number }>()
       .catch(() => null),

@@ -414,10 +414,14 @@ export async function retryPendingQuoteRequests(
 ): Promise<number> {
   const rows = await env.DB
     .prepare(
+      // `objects.published` is ISO, so it compares bare: `datetime(published)`
+      // kept the planner from using the published range of
+      // idx_objects_local_pub_actor and walked every local object instead of the
+      // week's (936 rows read per call against 51, every 10 minutes).
       `SELECT id, actor_id, quote_id FROM objects
         WHERE is_local = 1 AND quote_id IS NOT NULL AND quote_authorization_uri IS NULL
           AND visibility IN ('public', 'unlisted')
-          AND datetime(published) >= datetime('now', '-7 days')
+          AND published >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
         ORDER BY published DESC LIMIT ?`
     )
     .bind(limit)
