@@ -227,16 +227,36 @@ export default function ExplorePage() {
   }, []);
 
   const openEdit = useCallback((s: Status) => {
+    // Source text, not the rendered HTML stripped of tags: a remote mention
+    // keeps its full handle only in the anchor's `title`, emoji only in an
+    // `<img alt=":code:">` (see EditStatusModal — stripping made the mention's
+    // link disappear on save).
     const div = typeof document !== "undefined" ? document.createElement("div") : null;
+    let stripped: string;
     if (div) {
       div.innerHTML = s.content.replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n");
-      setEditText((div.textContent ?? div.innerText ?? "").trim());
+      stripped = (div.textContent ?? div.innerText ?? "").trim();
     } else {
-      setEditText(s.content.replace(/<[^>]*>/g, "").trim());
+      stripped = s.content.replace(/<[^>]*>/g, "").trim();
     }
+    setEditText(stripped);
     setEditSpoiler(s.spoiler_text ?? "");
     setEditingStatus(s);
-  }, []);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/v1/statuses/${encodeURIComponent(s.id)}/source`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { text?: string };
+        const source = typeof data.text === "string" ? data.text.trim() : "";
+        if (!source) return;
+        // Only replace the fallback, and only while it is still what the box
+        // holds: a late answer must not clobber another status's edit.
+        setEditText((prev) => (prev === stripped ? source : prev));
+      } catch { /* keep the stripped fallback */ }
+    })();
+  }, [token]);
 
   async function handleEditSave() {
     if (!editText.trim() || !editingStatus || !token) return;

@@ -86,14 +86,36 @@ export function EditStatusModal({
   // Initialize the form when the modal opens or the status changes.
   useEffect(() => {
     if (!status) return;
-    const div = typeof document !== "undefined" ? document.createElement("div") : null;
-    if (div) {
+    // The composer must start from the SOURCE text, not from the rendered HTML
+    // with its tags stripped: a remote mention keeps its full handle only in
+    // the anchor's `title`, custom emoji live in an `<img alt=":code:">` and the
+    // line breaks are `<br>`/`</p>`. Stripping lost all three, so editing a
+    // post dropped the mention's domain — the re-render could not resolve
+    // `@maripile` and showed it as plain text (the Mention tag survived, which
+    // is why peers still received it).
+    const stripped = (() => {
+      const div = typeof document !== "undefined" ? document.createElement("div") : null;
+      if (!div) return status.content.replace(/<[^>]*>/g, "").trim();
       div.innerHTML = status.content.replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n");
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setText((div.textContent ?? div.innerText ?? "").trim());
-    } else {
-      setText(status.content.replace(/<[^>]*>/g, "").trim());
-    }
+      return (div.textContent ?? div.innerText ?? "").trim();
+    })();
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setText(stripped);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/v1/statuses/${encodeURIComponent(status.id)}/source`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { text?: string };
+        const source = typeof data.text === "string" ? data.text.trim() : "";
+        if (!source || cancelled) return;
+        // Replace only what the fallback produced: never clobber text the
+        // reader has already started to edit.
+        setText((prev) => (prev === stripped ? source : prev));
+      } catch { /* keep the stripped fallback */ }
+    })();
     setSpoiler(status.spoiler_text ?? "");
     setShowCw(!!status.spoiler_text);
     setMedia(status.media_attachments ?? []);
@@ -126,7 +148,10 @@ export function EditStatusModal({
       setEventEnd(toLocalInput(meta?.endTime));
       setEventVenue(meta?.location ?? "");
     }
-  }, [status]);
+    return () => {
+      cancelled = true;
+    };
+  }, [status, token]);
 
   if (!status) return null;
   const s = status;
