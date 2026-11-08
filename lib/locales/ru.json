@@ -37,6 +37,7 @@
   "explore_remote_tip": "Для удаленных учетных записей используйте @user@domain.social",
   "explore_resolving": "Удаленный аккаунт через WebFinger",
   "explore_resolve_hint": "Нажмите Enter (или лупу), чтобы найти удалённый аккаунт через WebFinger",
+  "explore_submit_hint": "Нажмите Enter, чтобы искать ещё и в постах",
   "explore_resolve_busy": "Слишком много удалённых запросов — подождите минуту и попробуйте снова",
   "explore_search_failed": "Поиск не удался — попробуйте снова",
   "explore_tab_trending": "Недавнее",

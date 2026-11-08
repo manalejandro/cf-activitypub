@@ -37,6 +37,7 @@
   "explore_remote_tip": "Pour les comptes distants, utilisez @user@domain.social",
   "explore_resolving": "Résoudre un compte distant via WebFinger",
   "explore_resolve_hint": "Appuyez sur Entrée (ou sur la loupe) pour chercher le compte distant via WebFinger",
+  "explore_submit_hint": "Appuyez sur Entrée pour chercher aussi dans les publications",
   "explore_resolve_busy": "Trop de recherches distantes — attendez une minute et réessayez",
   "explore_search_failed": "La recherche a échoué — veuillez réessayer",
   "explore_tab_trending": "Récent",

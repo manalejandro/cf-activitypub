@@ -71,6 +71,9 @@ export default function ExplorePage() {
   // swallowed while the "resolving via WebFinger" hint stayed on screen.
   const [resolving, setResolving] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  // True once the reader has submitted: the last results include statuses (a
+  // typed search asks only for accounts/hashtags, which are index-cheap).
+  const [fullSearch, setFullSearch] = useState(false);
   const token = getToken();
   const router = useRouter();
   const { t } = useLocale();
@@ -137,10 +140,16 @@ export default function ExplorePage() {
     // identity per render would re-fire the debounce effect).
     const wantsResolve = resolve && Boolean(token) && (q.includes("@") || /^https?:\/\//i.test(q));
     setResolving(wantsResolve);
+    setFullSearch(resolve);
     setSearchError(null);
     try {
       const resolveFlag = wantsResolve ? "&resolve=true" : "";
-      const res = await fetch(`/api/v2/search?q=${encodeURIComponent(q)}${resolveFlag}`, {
+      // While typing, ask only for the cheap surfaces (a handle/URL prefix, or
+      // hashtags). The status search is a linear scan over `content` — there is
+      // no full-text index — so it belongs to the explicit submit, not to a
+      // 400 ms debounce firing on every keystroke.
+      const typeFlag = resolve ? "" : q.startsWith("#") ? "&type=hashtags" : "&type=accounts";
+      const res = await fetch(`/api/v2/search?q=${encodeURIComponent(q)}${resolveFlag}${typeFlag}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         signal: controller.signal,
       });
@@ -184,6 +193,7 @@ export default function ExplorePage() {
     searchSeqRef.current++;
     setLoading(false);
     setResolving(false);
+    setFullSearch(false);
     setSearchError(null);
     setQuery("");
     setDebouncedQuery("");
@@ -363,6 +373,11 @@ export default function ExplorePage() {
           {resolving && (
             <p style={{ fontSize: "0.75rem", color: "var(--accent)", marginTop: "0.4rem", paddingLeft: "0.5rem" }}>
               <Icon name="lightbulb-o" /> {t.explore_resolving}
+            </p>
+          )}
+          {!resolving && !searchError && !fullSearch && !query.startsWith("#") && query.trim().length >= 3 && (
+            <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.4rem", paddingLeft: "0.5rem" }}>
+              <Icon name="lightbulb-o" /> {t.explore_submit_hint}
             </p>
           )}
           {/* A handle or an IRI only resolves remotely on an explicit submit:

@@ -37,6 +37,7 @@
   "explore_remote_tip": "For remote accounts use @user@domain.social",
   "explore_resolving": "Resolving remote account via WebFinger",
   "explore_resolve_hint": "Press Enter (or the magnifier) to look up the remote account via WebFinger",
+  "explore_submit_hint": "Press Enter to search posts as well",
   "explore_resolve_busy": "Too many remote lookups — wait a minute and try again",
   "explore_search_failed": "Search failed — please try again",
   "explore_tab_trending": "Recent",

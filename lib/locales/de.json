@@ -37,6 +37,7 @@
   "explore_remote_tip": "Für Remote-Accounts verwenden Sie @user@domain.social",
   "explore_resolving": "Remote Account über WebFinger auflösen",
   "explore_resolve_hint": "Enter (oder die Lupe) drücken, um das entfernte Konto per WebFinger zu suchen",
+  "explore_submit_hint": "Enter drücken, um auch Beiträge zu durchsuchen",
   "explore_resolve_busy": "Zu viele entfernte Abfragen — eine Minute warten und erneut versuchen",
   "explore_search_failed": "Suche fehlgeschlagen — bitte erneut versuchen",
   "explore_tab_trending": "Jüngste",

@@ -37,6 +37,7 @@
   "explore_remote_tip": "원격 계정 사용 @user@domain.social",
   "explore_resolving": "WebFinger를 통한 원격 계정 해결",
   "explore_resolve_hint": "Enter(또는 돋보기)를 누르면 WebFinger로 원격 계정을 조회합니다",
+  "explore_submit_hint": "Enter를 누르면 게시물도 검색합니다",
   "explore_resolve_busy": "원격 조회가 너무 많습니다 — 1분 후 다시 시도해 주세요",
   "explore_search_failed": "검색에 실패했습니다 — 다시 시도해 주세요",
   "explore_tab_trending": "이름 *",

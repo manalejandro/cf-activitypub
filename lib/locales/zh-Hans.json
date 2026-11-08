@@ -37,6 +37,7 @@
   "explore_remote_tip": "对于远程账户,使用@user@domain.social",
   "explore_resolving": "通过 WebFinger 解决远程账户",
   "explore_resolve_hint": "按 Enter（或放大镜）即可通过 WebFinger 查询远程账号",
+  "explore_submit_hint": "按 Enter 可同时搜索帖子",
   "explore_resolve_busy": "远程查询过于频繁 — 请等待一分钟后再试",
   "explore_search_failed": "搜索失败 — 请重试",
   "explore_tab_trending": "近期",

@@ -176,28 +176,49 @@ export async function GET(request: NextRequest): Promise<Response> {
   }
 
   // ── Statuses ─────────────────────────────────────────────────────────────
-  if (doStatuses && me) {
-    const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
-    // Recency bound: LIKE cannot use an index, so an unbounded search scans the
-    // whole objects table from newest to oldest until LIMIT rows match. The
-    // 90-day bound (same as the hashtag timeline) caps that scan.
-    const recencyBound = new Date(Date.now() - 90 * 86400000).toISOString();
+  // A substring search over `content` is a linear scan (D1 has no FTS here), so
+  // the window IS the cost bound, and the scan must stay alone: measured on
+  // cf-ap, one search read 1,420,039 rows in 41 s — the `JOIN actors` probed the
+  // author of EVERY scanned row. Two cheap steps instead: ids first, then one
+  // batched lookup for the author state. 7 days ≈ 115k rows / ~6 s worst case
+  // (a query that matches nothing); 90 days extrapolates to ~40 s, which is what
+  // exhausts D1's 10-second resource window and 500s every other request.
+  // Under 3 characters a content scan is both useless and expensive.
+  const CONTENT_SEARCH_DAYS = 7;
+  const CONTENT_SEARCH_MIN_CHARS = 3;
+  if (doStatuses && me && q.trim().length >= CONTENT_SEARCH_MIN_CHARS) {
+    const like = `%${q.trim().replace(/[%_]/g, "\\$&")}%`;
+    const recencyBound = new Date(Date.now() - CONTENT_SEARCH_DAYS * 86400000).toISOString();
     const rows = await env.DB
       .prepare(
         `SELECT o.* FROM objects o
-         JOIN actors a ON a.id = o.actor_id
          WHERE o.content LIKE ? ESCAPE '\\'
            AND o.visibility IN ('public', 'unlisted')
            AND o.published >= ?
-           AND a.suspended = 0 AND a.silenced = 0
          ORDER BY o.published DESC
          LIMIT ? OFFSET ?`
       )
       .bind(like, recencyBound, limit, offset)
       .all<Record<string, unknown>>();
 
-    const objectIds = rows.results.map((r) => r.id as string);
-    const objs = rows.results.map((r) => ({
+    const candidateAuthors = [...new Set(rows.results.map((r) => r.actor_id as string))];
+    const hiddenAuthors = new Set<string>();
+    if (candidateAuthors.length > 0) {
+      const stateRows = await env.DB
+        .prepare(
+          `SELECT id FROM actors
+           WHERE id IN (SELECT value FROM json_each(?)) AND (suspended = 1 OR silenced = 1)`
+        )
+        .bind(JSON.stringify(candidateAuthors))
+        .all<{ id: string }>();
+      for (const r of stateRows.results ?? []) hiddenAuthors.add(r.id);
+    }
+    const visibleRows = hiddenAuthors.size > 0
+      ? rows.results.filter((r) => !hiddenAuthors.has(r.actor_id as string))
+      : rows.results;
+
+    const objectIds = visibleRows.map((r) => r.id as string);
+    const objs = visibleRows.map((r) => ({
       id: r.id as string,
       type: r.type as string,
       actorId: r.actor_id as string,
@@ -261,20 +282,29 @@ export async function GET(request: NextRequest): Promise<Response> {
     // ingest) instead of a LIKE scan over every stored content/raw document,
     // which was the single most expensive query on the instance.
     const tagQuery = (q.startsWith("#") ? q.slice(1) : q).toLowerCase();
-    const tagLike = `%${tagQuery.replace(/[%_]/g, "\\$&")}%`;
     const tagCutoff = new Date(Date.now() - 90 * 86400000).toISOString();
-    const tagRows = await env.DB
-      .prepare(
-        `SELECT tag, COUNT(*) AS uses
-         FROM object_tags
-         WHERE tag LIKE ? ESCAPE '\\'
-           AND published >= ?
-         GROUP BY tag
-         ORDER BY uses DESC
-         LIMIT 200`
-      )
-      .bind(tagLike, tagCutoff)
-      .all<{ tag: string; uses: number }>();
+    // Prefix RANGE, not a substring LIKE. `tag LIKE '%q%'` cannot use an index,
+    // so it scanned the whole 90-day window of a 1.2M-row table on every
+    // debounced keystroke — and this branch needs no session, so an anonymous
+    // visitor typing in the search box was enough: 4,082 ms / 839,376 rows read
+    // per call on cf-ap, which is what tripped D1's 10-second resource window
+    // and answered 500. `tag >= q AND tag < q+\uFFFF` is the prefix match
+    // Mastodon does and rides the covering (tag, published, actor) index:
+    // 3 ms / 419 rows.
+    const tagRows = tagQuery
+      ? await env.DB
+        .prepare(
+          `SELECT tag, COUNT(*) AS uses
+           FROM object_tags INDEXED BY idx_object_tags_tag_pub_actor
+           WHERE tag >= ? AND tag < ?
+             AND published >= ?
+           GROUP BY tag
+           ORDER BY uses DESC
+           LIMIT 200`
+        )
+        .bind(tagQuery, `${tagQuery}\uFFFF`, tagCutoff)
+        .all<{ tag: string; uses: number }>()
+      : { results: [] as { tag: string; uses: number }[] };
 
     const sorted = tagRows.results
       .slice(offset, offset + limit)

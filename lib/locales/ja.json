@@ -37,6 +37,7 @@
   "explore_remote_tip": "リモートアカウントでは、@user@domain.social を利用しています",
   "explore_resolving": "WebFingerによるリモートアカウントの解決",
   "explore_resolve_hint": "Enter（または虫めがね）を押すと、WebFinger でリモートアカウントを検索します",
+  "explore_submit_hint": "Enter を押すと投稿も検索します",
   "explore_resolve_busy": "リモート検索が多すぎます — 1 分ほど待ってから再度お試しください",
   "explore_search_failed": "検索に失敗しました — もう一度お試しください",
   "explore_tab_trending": "最近の投稿",

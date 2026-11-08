@@ -37,6 +37,7 @@
   "explore_remote_tip": "Para cuentas remotas usa @usuario@dominio.social",
   "explore_resolving": "Buscando cuenta remota — se resolverá via WebFinger",
   "explore_resolve_hint": "Pulsa Intro (o la lupa) para buscar la cuenta remota vía WebFinger",
+  "explore_submit_hint": "Pulsa Intro para buscar también en publicaciones",
   "explore_resolve_busy": "Demasiadas búsquedas remotas — espera un minuto e inténtalo de nuevo",
   "explore_search_failed": "La búsqueda ha fallado — inténtalo de nuevo",
   "explore_tab_trending": "Recientes",

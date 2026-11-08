@@ -37,6 +37,7 @@
   "explore_remote_tip": "Per gli account remoti utilizzare @user@domain.social",
   "explore_resolving": "Risolvere l'account remoto tramite WebFinger",
   "explore_resolve_hint": "Premi Invio (o la lente) per cercare l'account remoto via WebFinger",
+  "explore_submit_hint": "Premi Invio per cercare anche tra i post",
   "explore_resolve_busy": "Troppe ricerche remote — attendi un minuto e riprova",
   "explore_search_failed": "Ricerca non riuscita — riprova",
   "explore_tab_trending": "Recenti",
