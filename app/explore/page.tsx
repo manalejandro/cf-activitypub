@@ -64,6 +64,13 @@ export default function ExplorePage() {
   // each run aborts the previous request and carries a sequence number.
   const searchAbortRef = useRef<AbortController | null>(null);
   const searchSeqRef = useRef(0);
+  // Remote resolution (WebFinger + a signed actor fetch) is rate limited server
+  // side — 15 per minute per account — so it must never ride the keystroke
+  // debounce: typing `@user@domain` or an IRI character by character used to
+  // burn the whole budget and every later search came back 429, which the UI
+  // swallowed while the "resolving via WebFinger" hint stayed on screen.
+  const [resolving, setResolving] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const token = getToken();
   const router = useRouter();
   const { t } = useLocale();
@@ -115,7 +122,7 @@ export default function ExplorePage() {
     if (res.ok) setMe(await res.json() as Me);
   }
 
-  const runSearch = useCallback(async (q: string) => {
+  const runSearch = useCallback(async (q: string, resolve = false) => {
     // Supersede the search in flight: a slow (or hanging) response for an
     // earlier prefix can neither overwrite the current results nor leave the
     // "searching" state stuck.
@@ -124,8 +131,15 @@ export default function ExplorePage() {
     searchAbortRef.current = controller;
     const seq = ++searchSeqRef.current;
     setLoading(true);
+    // Remote resolution only on an explicit submit, and only when there is
+    // something to resolve and a session to resolve it with. The error is kept
+    // as a code so this callback does not depend on the locale proxy (a new `t`
+    // identity per render would re-fire the debounce effect).
+    const wantsResolve = resolve && Boolean(token) && (q.includes("@") || /^https?:\/\//i.test(q));
+    setResolving(wantsResolve);
+    setSearchError(null);
     try {
-      const resolveFlag = q.includes("@") ? "&resolve=true" : "";
+      const resolveFlag = wantsResolve ? "&resolve=true" : "";
       const res = await fetch(`/api/v2/search?q=${encodeURIComponent(q)}${resolveFlag}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         signal: controller.signal,
@@ -140,19 +154,37 @@ export default function ExplorePage() {
         else if (data.statuses.length) setTab("statuses");
         else if (data.collections.length) setTab("collections");
         else setTab("accounts");
+      } else {
+        setSearchError(res.status === 429 ? "busy" : "failed");
       }
     } catch {
       // Aborted (superseded/cleared) or network failure: keep what is shown.
     } finally {
-      if (seq === searchSeqRef.current) setLoading(false);
+      if (seq === searchSeqRef.current) {
+        setLoading(false);
+        setResolving(false);
+      }
     }
   }, [token]);
+
+  /** Explicit submit (Enter or the magnifier): the only path that resolves remotely. */
+  const submitSearch = useCallback(() => {
+    const q = query.trim();
+    if (!q) return;
+    // Cancel the pending keystroke search instead of updating `debouncedQuery`:
+    // that effect would immediately re-run the same query WITHOUT resolution
+    // and abort the resolving request we just started.
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    void runSearch(q, true);
+  }, [query, runSearch]);
 
   /** Leave search mode: cancel the in-flight query and show trending again. */
   const clearSearch = useCallback(() => {
     searchAbortRef.current?.abort();
     searchSeqRef.current++;
     setLoading(false);
+    setResolving(false);
+    setSearchError(null);
     setQuery("");
     setDebouncedQuery("");
     setResults({ accounts: [], statuses: [], hashtags: [], collections: [] });
@@ -177,7 +209,9 @@ export default function ExplorePage() {
 
   useEffect(() => {
     if (!debouncedQuery.trim()) return;
-    void runSearch(debouncedQuery.trim());
+    // Typing searches locally only (cached accounts, tags, statuses); remote
+    // resolution is the explicit submit's job (see `submitSearch`).
+    void runSearch(debouncedQuery.trim(), false);
   }, [debouncedQuery, runSearch]);
 
   const handleFav = useCallback((updated: Status) => {
@@ -267,7 +301,14 @@ export default function ExplorePage() {
         {/* Search bar */}
         <div style={{ padding: "0.875rem 1rem", borderBottom: "1px solid var(--border)", position: "sticky", top: 0, zIndex: 10, background: "var(--bg)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", background: "var(--bg-elevated)", borderRadius: "var(--radius-full)", padding: "0.5rem 1rem", border: "1px solid var(--border)" }}>
-            <span style={{ fontSize: "1rem", flexShrink: 0 }}><Icon name="search" /></span>
+            <button
+              type="button"
+              onClick={submitSearch}
+              aria-label={t.explore_search_ph}
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", fontSize: "1rem", flexShrink: 0 }}
+            >
+              <Icon name="search" />
+            </button>
             <input
               type="search"
               placeholder={t.explore_search_ph}
@@ -277,6 +318,12 @@ export default function ExplorePage() {
                 const next = e.target.value;
                 setQuery(next);
                 if (!next.trim()) clearSearch();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submitSearch();
+                }
               }}
               style={{ flex: 1, background: "transparent", border: "none", outline: "none", fontSize: "0.9rem", color: "var(--text)" }}
             />
@@ -288,9 +335,22 @@ export default function ExplorePage() {
               </button>
             )}
           </div>
-          {query.includes("@") && !query.startsWith("#") && (
+          {searchError && (
+            <p role="alert" style={{ fontSize: "0.75rem", color: "var(--danger)", marginTop: "0.4rem", paddingLeft: "0.5rem" }}>
+              <Icon name="exclamation-triangle" /> {searchError === "busy" ? t.explore_resolve_busy : t.explore_search_failed}
+            </p>
+          )}
+          {resolving && (
             <p style={{ fontSize: "0.75rem", color: "var(--accent)", marginTop: "0.4rem", paddingLeft: "0.5rem" }}>
               <Icon name="lightbulb-o" /> {t.explore_resolving}
+            </p>
+          )}
+          {/* A handle or an IRI only resolves remotely on an explicit submit:
+              say so instead of promising a resolution that never runs. */}
+          {!resolving && !searchError && Boolean(token) && !query.startsWith("#")
+            && (query.includes("@") || /^https?:\/\//i.test(query)) && results.accounts.length === 0 && (
+            <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.4rem", paddingLeft: "0.5rem" }}>
+              <Icon name="lightbulb-o" /> {t.explore_resolve_hint}
             </p>
           )}
         </div>

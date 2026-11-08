@@ -47,12 +47,19 @@ async function seedActivity(published: Date): Promise<void> {
 }
 
 async function seedLocalObject(id: string, published: Date): Promise<void> {
+  // `objects.published` is ISO-8601 in production (every writer binds
+  // `toISOString()`; 0 of 562,615 rows on cf-ap hold the DB shape) and the
+  // readers compare it bare against `strftime('%Y-%m-%dT%H:%M:%fZ', …)`. Seeding
+  // the column DEFAULT's space-separated shape made `statuses_24h` fail only
+  // near UTC midnight, when the value and the cutoff share a date part and
+  // `' ' < 'T'` decides the comparison. (`activities.published` IS DB-shape —
+  // see `seedActivity`; the two columns deliberately differ.)
   await db
     .prepare(
       `INSERT INTO objects (id, type, actor_id, content, visibility, published, updated_at, is_local)
        VALUES (?, 'Note', ?, 'hola', 'public', ?, ?, 1)`
     )
-    .bind(id, LOCAL, published.toISOString().replace("T", " ").slice(0, 19), published.toISOString().replace("T", " ").slice(0, 19))
+    .bind(id, LOCAL, published.toISOString(), published.toISOString())
     .run();
 }
 

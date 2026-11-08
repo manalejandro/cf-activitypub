@@ -720,12 +720,13 @@ describe("own status permalinks", () => {
       )
       .bind(LOCAL_ACTOR)
       .run();
+    const published = new Date().toISOString();
     await db
       .prepare(
         `INSERT INTO objects (id, type, actor_id, content, visibility, is_local, url, published, updated_at, raw)
-         VALUES (?, 'Note', ?, ?, 'public', 1, ?, datetime('now'), datetime('now'), '{}')`
+         VALUES (?, 'Note', ?, ?, 'public', 1, ?, ?, ?, '{}')`
       )
-      .bind(TARGET, LOCAL_ACTOR, content, PERMALINK)
+      .bind(TARGET, LOCAL_ACTOR, content, PERMALINK, published, published)
       .run();
     if (withImage) {
       await db
