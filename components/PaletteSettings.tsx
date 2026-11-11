@@ -23,7 +23,7 @@ export function PaletteSettings() {
   const [saved, setSaved] = useState<SavedPalette>(() => loadPalette());
   const [custom, setCustom] = useState<CustomPaletteInput>(() => {
     const s = loadPalette();
-    return s.type === "custom" ? s.custom : { accent: "#6366f1", lightBg: "#f4f4ff", darkBg: "#0f0f17" };
+    return s.type === "custom" ? s.custom : { accent: "#4f46e5", lightBg: "#f5f6f8", darkBg: "#0d0f13" };
   });
 
   const customPalette = buildPalette(custom);
@@ -59,13 +59,13 @@ export function PaletteSettings() {
             border: "2px solid",
             borderColor: saved.type === "default" ? "var(--accent)" : "var(--border)",
             cursor: "pointer",
-            background: "linear-gradient(180deg, #f4f4ff 0%, #f4f4ff 50%, #0f0f17 50%, #0f0f17 100%)",
+            background: "linear-gradient(180deg, #f5f6f8 0%, #f5f6f8 50%, #0d0f13 50%, #0d0f13 100%)",
             padding: 0,
             position: "relative",
           }}
         >
           <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ width: 14, height: 14, borderRadius: "50%", background: "#6366f1", border: "2px solid #fff" }} />
+            <span style={{ width: 14, height: 14, borderRadius: "50%", background: "#4f46e5", border: "2px solid #fff" }} />
           </span>
         </button>
 

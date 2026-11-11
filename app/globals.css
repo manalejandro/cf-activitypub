@@ -1,85 +1,134 @@
 @import "tailwindcss";
 
+/*
+ * Default palette: "iris on cool graphite".
+ *
+ * The brand hue stays iris (it is the instance's declared theme_color and the
+ * "Indigo" preset in lib/palettes.ts keeps the previous look for anyone who
+ * installed it), but the neutrals are no longer tinted with it. Violet-tinted
+ * grays made every surface compete with the accent and read as a generic
+ * purple haze; near-neutral graphite lets the accent be the only saturated
+ * thing on screen, which is what gives the hierarchy back.
+ *
+ * Contrast is deliberate, not inherited:
+ *  - --accent #4f46e5 with white text = 6.3:1 (the old #6366f1 was 3.8:1,
+ *    under AA for the primary button's label);
+ *  - --accent-light doubles as the link/text tone on light surfaces (8.1:1);
+ *  - semantic colors are deep enough to be read AS TEXT on light (the old
+ *    pastel set was 2.6-2.9:1) while still working as fills via --on-danger.
+ * Radii vary by element (inputs/buttons 8px, cards 12px, overlays 16px):
+ * one radius everywhere looks stamped out.
+ */
 :root {
-  --bg: #f4f4ff;
+  --bg: #f5f6f8;
   --bg-surface: #ffffff;
-  --bg-elevated: #f0f0fa;
-  --bg-overlay: #e8e8f8;
-  --border: #d0d0e8;
-  --border-hover: #a0a0d0;
-  --text-primary: #1a1a3a;
-  --text-secondary: #4a4a7a;
-  --text-muted: #66669c;
-  --accent: #6366f1;
-  --accent-light: #4f46e5;
-  --accent-hover: #4f52cc;
-  --accent-bg: rgba(99, 102, 241, 0.08);
-  --success: #34d399;
-  --warning: #fbbf24;
-  --danger: #f87171;
-  --radius-sm: 0.375rem;
+  --bg-elevated: #f0f2f5;
+  --bg-overlay: #e7eaef;
+  --border: #dfe3e9;
+  --border-hover: #c2c9d4;
+  --text-primary: #14161a;
+  --text-secondary: #4b525e;
+  --text-muted: #6c737f;
+  --accent: #4f46e5;
+  --accent-light: #4338ca;
+  --accent-hover: #4338ca;
+  --accent-bg: rgba(79, 70, 229, 0.08);
+  --on-accent: #ffffff;
+  --success: #047857;
+  --warning: #b45309;
+  --danger: #c62f2f;
+  --danger-hover: #a52626;
+  --on-danger: #ffffff;
+  --radius-sm: 0.5rem;
   --radius: 0.625rem;
-  --radius-lg: 1rem;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04);
-  --shadow-lg: 0 8px 32px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.04);
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.125rem;
+  --shadow: 0 1px 2px rgba(16, 20, 28, 0.06), 0 1px 3px rgba(16, 20, 28, 0.08), 0 0 0 1px rgba(16, 20, 28, 0.04);
+  --shadow-lg: 0 12px 32px rgba(16, 20, 28, 0.14), 0 2px 8px rgba(16, 20, 28, 0.08), 0 0 0 1px rgba(16, 20, 28, 0.05);
+  --hover-tint: rgba(20, 22, 26, 0.035);
 }
 
 :root[data-theme="dark"] {
-  --bg: #0f0f17;
-  --bg-surface: #17172b;
-  --bg-elevated: #1e1e38;
-  --bg-overlay: #262645;
-  --border: #2d2d52;
-  --border-hover: #4444a0;
-  --text-primary: #e8e8ff;
-  --text-secondary: #9898cc;
-  --text-muted: #9494c4;
-  --accent-light: #818cf8;
-  --accent-bg: rgba(99, 102, 241, 0.12);
-  --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
-  --shadow-lg: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.04);
+  --bg: #0d0f13;
+  --bg-surface: #14171c;
+  --bg-elevated: #1a1e25;
+  --bg-overlay: #22272f;
+  --border: #262c35;
+  --border-hover: #3b434f;
+  --text-primary: #e9ecf1;
+  --text-secondary: #a8b0bc;
+  --text-muted: #868e9b;
+  --accent: #6d6bf5;
+  --accent-light: #a9a7ff;
+  --accent-hover: #7d7bf7;
+  --accent-bg: rgba(109, 107, 245, 0.14);
+  --on-accent: #ffffff;
+  --success: #3ddc97;
+  --warning: #ffc44d;
+  --danger: #e5484d;
+  --danger-hover: #f2686c;
+  --on-danger: #ffffff;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --hover-tint: rgba(255, 255, 255, 0.045);
 }
 
 /* Pages that must always render in day mode (landing, auth flows, status)
    regardless of the global night/day toggle. The `color` matters as much as
    the variables: `body` sets its own colour from the installed palette, and a
-   descendant only sees the overridden variables if it asks for them — text
+   descendant only sees the overridden variables if it asks for them - text
    that simply inherits kept the palette's (dark-theme) colour and rendered
    nearly invisible on the forced-light surface. */
 .force-light {
   color: var(--text-primary);
-  --bg: #f4f4ff;
+  --bg: #f5f6f8;
   --bg-surface: #ffffff;
-  --bg-elevated: #f0f0fa;
-  --bg-overlay: #e8e8f8;
-  --border: #d0d0e8;
-  --border-hover: #a0a0d0;
-  --text-primary: #1a1a3a;
-  --text-secondary: #4a4a7a;
-  --text-muted: #66669c;
-  --accent: #6366f1;
-  --accent-light: #4f46e5;
-  --accent-hover: #4f52cc;
-  --accent-bg: rgba(99, 102, 241, 0.08);
-  --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04);
-  --shadow-lg: 0 8px 32px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.04);
+  --bg-elevated: #f0f2f5;
+  --bg-overlay: #e7eaef;
+  --border: #dfe3e9;
+  --border-hover: #c2c9d4;
+  --text-primary: #14161a;
+  --text-secondary: #4b525e;
+  --text-muted: #6c737f;
+  --accent: #4f46e5;
+  --accent-light: #4338ca;
+  --accent-hover: #4338ca;
+  --accent-bg: rgba(79, 70, 229, 0.08);
+  --on-accent: #ffffff;
+  --success: #047857;
+  --warning: #b45309;
+  --danger: #c62f2f;
+  --danger-hover: #a52626;
+  --on-danger: #ffffff;
+  --shadow: 0 1px 2px rgba(16, 20, 28, 0.06), 0 1px 3px rgba(16, 20, 28, 0.08), 0 0 0 1px rgba(16, 20, 28, 0.04);
+  --shadow-lg: 0 12px 32px rgba(16, 20, 28, 0.14), 0 2px 8px rgba(16, 20, 28, 0.08), 0 0 0 1px rgba(16, 20, 28, 0.05);
+  --hover-tint: rgba(20, 22, 26, 0.035);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
-    --bg: #0f0f17;
-    --bg-surface: #17172b;
-    --bg-elevated: #1e1e38;
-    --bg-overlay: #262645;
-    --border: #2d2d52;
-    --border-hover: #4444a0;
-    --text-primary: #e8e8ff;
-    --text-secondary: #9898cc;
-    --text-muted: #9494c4;
-    --accent-light: #818cf8;
-    --accent-bg: rgba(99, 102, 241, 0.12);
-    --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
-    --shadow-lg: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.04);
+    --bg: #0d0f13;
+    --bg-surface: #14171c;
+    --bg-elevated: #1a1e25;
+    --bg-overlay: #22272f;
+    --border: #262c35;
+    --border-hover: #3b434f;
+    --text-primary: #e9ecf1;
+    --text-secondary: #a8b0bc;
+    --text-muted: #868e9b;
+    --accent: #6d6bf5;
+    --accent-light: #a9a7ff;
+    --accent-hover: #7d7bf7;
+    --accent-bg: rgba(109, 107, 245, 0.14);
+    --on-accent: #ffffff;
+    --success: #3ddc97;
+    --warning: #ffc44d;
+    --danger: #e5484d;
+    --danger-hover: #f2686c;
+    --on-danger: #ffffff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --hover-tint: rgba(255, 255, 255, 0.045);
   }
 }
 
@@ -92,6 +141,11 @@ html {
 
 body {
   background-color: var(--bg);
+  /* Signature detail: a barely-there iris wash that fades out below the fold.
+     It gives the app a sense of light coming from the top without a gradient
+     blob, and it is the only place the accent touches a surface at large. */
+  background-image: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent) 0, transparent 22rem);
+  background-repeat: no-repeat;
   color: var(--text-primary);
   /* next/font self-hosts the faces and exposes them through these variables
      (the literal family names are hashed at build time, so the variables are
@@ -118,16 +172,16 @@ pre, code, kbd, samp {
    `scrollbar-width`/`scrollbar-color` makes Chromium ignore the 6px rules
    above and render the bar at its default (thick) width. Colours mirror the
    day palette in `.force-light`. */
-:root:has(.force-light)::-webkit-scrollbar-track { background: #f4f4ff; }
-:root:has(.force-light)::-webkit-scrollbar-thumb { background: #d0d0e8; }
-:root:has(.force-light)::-webkit-scrollbar-thumb:hover { background: #a0a0d0; }
+:root:has(.force-light)::-webkit-scrollbar-track { background: #f5f6f8; }
+:root:has(.force-light)::-webkit-scrollbar-thumb { background: #dfe3e9; }
+:root:has(.force-light)::-webkit-scrollbar-thumb:hover { background: #c2c9d4; }
 
 /* Sidebar scrollbar — thinner and in the logo/brand colour */
 .sidebar-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
-.sidebar-scroll::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 9999px; }
-.sidebar-scroll::-webkit-scrollbar-thumb:hover { background: var(--accent-hover); }
+.sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 9999px; }
+.sidebar-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 .sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
-.sidebar-scroll { scrollbar-width: thin; scrollbar-color: var(--accent) transparent; }
+.sidebar-scroll { scrollbar-width: thin; scrollbar-color: var(--border-hover) transparent; }
 
 /* Profile tab bars — when the tabs overflow, a thin horizontal scrollbar in
    the brand colour (Chromium shows it because custom scrollbar styling
@@ -158,24 +212,29 @@ a .ellipsis::after {
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
 
-h1,h2,h3,h4,h5,h6 { font-weight: 600; line-height: 1.25; letter-spacing: -0.025em; color: var(--text-primary); }
+h1,h2,h3,h4,h5,h6 { font-weight: 600; line-height: 1.22; letter-spacing: -0.025em; color: var(--text-primary); text-wrap: balance; }
 
 a { color: var(--accent-light); text-decoration: none; transition: color 0.15s; }
 a:hover { color: var(--accent); }
 
 .card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
 
+/* Radius hierarchy: 8px controls, 10px surfaces, 14px cards, 18px overlays.
+   One radius for everything is what makes a system look stamped out. */
+[role="dialog"] { border-radius: var(--radius-xl); }
+
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
-  padding: 0.5rem 1.125rem; border-radius: var(--radius); font-size: 0.9rem;
+  padding: 0.5rem 1.125rem; border-radius: var(--radius-sm); font-size: 0.9rem;
   font-weight: 500; cursor: pointer; border: 1px solid transparent;
-  transition: background 0.15s, border-color 0.15s, transform 0.1s; white-space: nowrap; line-height: 1.4;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+  white-space: nowrap; line-height: 1.4;
 }
 .btn:active { transform: scale(0.98); }
-.btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
-.btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
-.btn-danger:hover { background: var(--danger-hover, var(--danger)); border-color: var(--danger); color: #fff; }
+.btn-primary { background: var(--accent); color: var(--on-accent, #fff); border-color: var(--accent); box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 32%, transparent); }
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent, #fff); box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 34%, transparent); }
+.btn-danger { background: var(--danger); color: var(--on-danger, #fff); border-color: var(--danger); }
+.btn-danger:hover { background: var(--danger-hover, var(--danger)); border-color: var(--danger-hover, var(--danger)); color: var(--on-danger, #fff); }
 .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-outline { background: transparent; color: var(--text-primary); border-color: var(--border); }
 .btn-outline:hover { background: var(--bg-elevated); border-color: var(--border-hover); color: var(--text-primary); }
@@ -196,7 +255,7 @@ a:hover { color: var(--accent); }
 }
 .tab:hover { background: var(--accent-bg); color: var(--accent-light); }
 .tab[aria-selected="true"] { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
-.tab-count { font-size: 0.8rem; opacity: 0.75; }
+.tab-count { font-size: 0.8rem; opacity: 0.75; font-variant-numeric: tabular-nums; }
 
 /* Hide `.btn` elements below md (Tailwind's `hidden` loses to the unlayered
    `.btn { display: inline-flex }` rule). Used for actions that move into the
@@ -207,7 +266,7 @@ a:hover { color: var(--accent); }
 
 .input {
   width: 100%; padding: 0.625rem 0.875rem; background: var(--bg-elevated);
-  border: 1px solid var(--border); border-radius: var(--radius);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text-primary); font-size: 0.9rem;
   transition: border-color 0.15s, box-shadow 0.15s; outline: none;
 }
@@ -224,8 +283,8 @@ a:hover { color: var(--accent); }
   .media-player__volume { display: none; }
 }
 
-.status-card { padding: 1rem; border-bottom: 1px solid var(--border); transition: background 0.12s; }
-.status-card:hover { background: var(--accent-bg); }
+.status-card { padding: 1rem; border-bottom: 1px solid var(--border); transition: background 0.14s ease, box-shadow 0.14s ease; }
+.status-card:hover { background: var(--hover-tint, var(--accent-bg)); box-shadow: inset 2px 0 0 var(--accent); }
 
 /* Status content — paragraphs for blank-line spacing, emoji alignment */
 .status-content { overflow-wrap: break-word; word-break: break-word; }
@@ -243,7 +302,7 @@ img.emojione { display: inline; vertical-align: middle; }
 
 .avatar { border-radius: 50%; object-fit: cover; background: var(--bg-overlay); flex-shrink: 0; }
 
-.badge { display: inline-flex; align-items: center; padding: 0.2rem 0.55rem; border-radius: 9999px; font-size: 0.72rem; font-weight: 600; }
+.badge { display: inline-flex; align-items: center; padding: 0.2rem 0.55rem; border-radius: 9999px; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.01em; font-variant-numeric: tabular-nums; }
 .badge-accent { background: var(--accent-bg); color: var(--accent-light); }
 .badge-success { background: rgba(52,211,153,0.12); color: var(--success); }
 

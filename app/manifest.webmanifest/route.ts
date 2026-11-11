@@ -51,8 +51,8 @@ export async function GET(request: NextRequest): Promise<Response> {
     start_url: "/",
     scope: "/",
     display: "standalone",
-    background_color: "#0f0f17",
-    theme_color: "#6366f1",
+    background_color: "#0d0f13",
+    theme_color: "#4f46e5",
     orientation: "portrait-primary",
     icons: [
       { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },

@@ -79,7 +79,7 @@ export default function LocationMapFull({ location }: { location: GeoLocation })
       routeLayerRef.current = layer;
       layer.clearLayers();
       const accent =
-        getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#6366f1";
+        getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#4f46e5";
 
       const straight = () => {
         const meters = distanceMeters(origin, location);
