@@ -161,6 +161,16 @@ export async function POST(request: NextRequest): Promise<Response> {
   const canonicalOwner = canonHash ? await getActorByCanonicalEmailHash(env.DB, canonHash) : null;
   const farmAttempt = priorAttempts >= 2;
 
+  // Counted only for attempts that got a real answer (a client-side rejection
+  // or a created account). It used to be incremented up front, so three
+  // server-side failures — a 500 from PBKDF2, a KV hiccup, anything — banned
+  // the mailbox permanently and told the applicant "email already taken".
+  const countAttempt = async () => {
+    try {
+      await env.KV.put(attemptsKey, String(priorAttempts + 1), { expirationTtl: 86400 });
+    } catch { /* best-effort */ }
+  };
+
   if (canonicalBlock || canonicalOwner || farmAttempt) {
     if (!canonicalBlock) {
       await createCanonicalEmailBlock(
@@ -188,18 +198,23 @@ export async function POST(request: NextRequest): Promise<Response> {
       emailTo: null,
       relatedId: null,
     });
-    return json({ error: "Email already taken", error_code: "register_error_email_taken" }, 422);
+    // Say which of the two it is: "already taken" sends the applicant to reset
+    // a password for an account that does not exist, while an attempt-block
+    // needs an administrator (now visible at /admin/email_blocks).
+    return json(
+      canonicalOwner
+        ? { error: "Email already taken", error_code: "register_error_email_taken" }
+        : { error: "Too many registration attempts from this mailbox", error_code: "register_error_email_attempts" },
+      422
+    );
   }
-
-  try {
-    await env.KV.put(attemptsKey, String(priorAttempts + 1), { expirationTtl: 86400 });
-  } catch { /* best-effort */ }
 
   const existingUsername = await env.DB
     .prepare("SELECT id FROM actors WHERE username = ? AND domain = ?")
     .bind(username.toLowerCase(), domain)
     .first();
   if (existingUsername) {
+    await countAttempt();
     return json({ error: "Username already taken", error_code: "register_error_username_taken" }, 422);
   }
 

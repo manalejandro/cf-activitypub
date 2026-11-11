@@ -83,6 +83,14 @@ export async function DELETE(request: NextRequest): Promise<Response> {
   const removed = await deleteCanonicalEmailBlock(env.DB, hash);
   if (!removed) return json({ ok: false, error: "Not found" }, 404);
 
+  // The attempt counter lives in KV (`canonical:reg:<hash>`, 24 h TTL). Clearing
+  // only the row would leave the mailbox refused — the third attempt sees
+  // `priorAttempts >= 2` and re-creates the block — so an administrator's
+  // "unblock" would appear to do nothing for up to a day.
+  try {
+    await env.KV.delete(`canonical:reg:${hash}`);
+  } catch { /* best effort: the TTL clears it within a day anyway */ }
+
   await recordModeration(env, {
     id: generateId(),
     source: "user",
