@@ -26,7 +26,8 @@ import { computeRegistrationSignals } from "@/lib/moderation/heuristics";
 import { AUTO_ACTION_THRESHOLD, vectorPreScreen } from "@/lib/moderation/vectors";
 import { canonicalEmailHash } from "@/lib/canonical-email";
 import { recordModeration } from "@/lib/moderation/log";
-import { emailDomain, isBlockedEmailDomain, MIN_PASSWORD_LENGTH, registrationBlockedEmailDomains } from "@/lib/constants";
+import { emailDomain, isBlockedEmailDomain, registrationBlockedEmailDomains } from "@/lib/constants";
+import { validatePassword, passwordIssueCode, passwordIssueMessage } from "@/lib/password-policy";
 import { clampScope } from "@/lib/oauth-scopes";
 import { env } from "cloudflare:workers";
 
@@ -84,8 +85,14 @@ export async function POST(request: NextRequest): Promise<Response> {
     return json({ error: "Username must be 1-30 alphanumeric characters or underscores", error_code: "register_error_username_invalid" }, 422);
   }
 
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    return json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`, error_code: "register_error_password_short" }, 422);
+  // Shared with the form (lib/password-policy.ts): length, a letter and a
+  // digit, no own identifier inside, no frequent password.
+  const passwordIssue = validatePassword(password, [username, email]);
+  if (passwordIssue) {
+    return json(
+      { error: passwordIssueMessage(passwordIssue), error_code: passwordIssueCode(passwordIssue) },
+      422
+    );
   }
 
   // Account creation is a browser-only flow (Mastodon apps authenticate

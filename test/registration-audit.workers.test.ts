@@ -35,7 +35,7 @@ function register(username: string, email: string): Promise<Response> {
     new NextRequest("https://local.example.test/api/v1/accounts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, email, password: "una-contraseña-larga" }),
+      body: JSON.stringify({ username, email, password: "Caballo-bateria-42" }),
     })
   );
 }

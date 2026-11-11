@@ -140,7 +140,7 @@ describe("POST /api/v1/accounts", () => {
   it("rejects a tokenless registration when Turnstile is configured", async () => {
     // The old code verified the captcha only when a token was present, so a bot
     // could skip the challenge by omitting `cf-turnstile-response`.
-    const { status, body } = await post({ username: "newbie", email: "new@example.com", password: "password123" });
+    const { status, body } = await post({ username: "newbie", email: "new@example.com", password: "Caballo-bateria-42" });
 
     expect(status).toBe(422);
     expect(body.error_code).toBe("turnstile_error");
@@ -150,7 +150,7 @@ describe("POST /api/v1/accounts", () => {
 
   it("allows tokenless registration only when no captcha secret is configured", async () => {
     mocks.env = { DB: fakeDb, KV: {}, EMAIL: {}, FROM_EMAIL: "noreply@local.example", INSTANCE_TITLE: "Test" };
-    const { status, body } = await post({ username: "newbie", email: "new@example.com", password: "password123" });
+    const { status, body } = await post({ username: "newbie", email: "new@example.com", password: "Caballo-bateria-42" });
 
     expect(status).toBe(200);
     expect(mocks.verifyTurnstileToken).not.toHaveBeenCalled();
@@ -161,7 +161,7 @@ describe("POST /api/v1/accounts", () => {
     const { status, body } = await post({
       username: "newbie",
       email: "new@example.com",
-      password: "password123",
+      password: "Caballo-bateria-42",
       "cf-turnstile-response": "turnstile-token",
     });
 
@@ -185,7 +185,7 @@ describe("POST /api/v1/accounts", () => {
     const { status, body } = await post({
       username: "newbie",
       email: "a544049483+b1r2@gmail.com",
-      password: "password123",
+      password: "Caballo-bateria-42",
       "cf-turnstile-response": "turnstile-token",
     });
 
@@ -200,7 +200,7 @@ describe("POST /api/v1/accounts", () => {
     const { status, body } = await post({
       username: "newbie",
       email: "bot@tempmail.ai",
-      password: "password123",
+      password: "Caballo-bateria-42",
       "cf-turnstile-response": "turnstile-token",
     });
 
@@ -214,7 +214,7 @@ describe("POST /api/v1/accounts", () => {
     const { status, body } = await post({
       username: "newbie",
       email: "bot@relay.tempmail.ai",
-      password: "password123",
+      password: "Caballo-bateria-42",
       "cf-turnstile-response": "turnstile-token",
     });
 
@@ -227,7 +227,7 @@ describe("POST /api/v1/accounts", () => {
     const { status, body } = await post({
       username: "newbie",
       email: "taken@example.com",
-      password: "password123",
+      password: "Caballo-bateria-42",
       "cf-turnstile-response": "turnstile-token",
     });
     expect(status).toBe(422);
@@ -247,7 +247,7 @@ describe("POST /api/v1/accounts", () => {
     const { status, body } = await post({
       username: "newbie",
       email: "new@example.com",
-      password: "password123",
+      password: "Caballo-bateria-42",
       "cf-turnstile-response": "turnstile-token",
     });
 

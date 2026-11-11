@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   mediaCacheId: vi.fn(async (v: string) => `id-${v}`),
   verifyPassword: vi.fn(async () => true),
   generateSecureToken: vi.fn(() => "code-tok"),
-  hashPassword: vi.fn(async () => "pbkdf2:600000:aa:bb"),
+  hashPassword: vi.fn(async () => "pbkdf2:100000:aa:bb"),
   needsPasswordRehash: vi.fn(() => false),
   updatePassword: vi.fn(async () => {}),
   atomicRateLimit:

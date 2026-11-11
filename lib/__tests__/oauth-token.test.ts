@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   verifyPassword: vi.fn(async () => true),
   generateSecureToken: vi.fn(() => "tok"),
   setAuthCookie: vi.fn(() => "auth_token=x"),
-  hashPassword: vi.fn(async () => "pbkdf2:600000:aa:bb"),
+  hashPassword: vi.fn(async () => "pbkdf2:100000:aa:bb"),
   needsPasswordRehash: vi.fn(() => false),
   enforceTurnstilePolicy: vi.fn(async () => ({ success: true })),
   checkRateLimit:

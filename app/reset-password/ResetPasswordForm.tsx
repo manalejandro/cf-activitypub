@@ -4,9 +4,11 @@ import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useLocale } from "@/lib/i18n";
+import { useLocale, translateKey } from "@/lib/i18n";
 import { LanguagePicker } from "@/components/LanguagePicker";
 import TurnstileWidget from "@/components/TurnstileWidget";
+import { MAX_PASSWORD_LENGTH, passwordIssues, type PasswordIssue } from "@/lib/password-policy";
+import { MIN_PASSWORD_LENGTH } from "@/lib/constants";
 
 export default function ResetPasswordForm({ turnstileSiteKey = "" }: { turnstileSiteKey?: string } = {}) {
   const [password, setPassword] = useState("");
@@ -19,9 +21,34 @@ export default function ResetPasswordForm({ turnstileSiteKey = "" }: { turnstile
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
 
+  // The policy the server applies (lib/password-policy.ts), minus the
+  // own-identifier rule: this form has no account context, and the route checks
+  // that one as soon as the token resolves.
+  const passwordProblems = passwordIssues(password);
+  const passwordMismatch = confirmPassword.length > 0 && password !== confirmPassword;
+
+  function passwordIssueText(issue: PasswordIssue): string {
+    switch (issue) {
+      case "short":
+        return t.register_error_password_short.replace("{min}", String(MIN_PASSWORD_LENGTH));
+      case "long":
+        return t.password_error_long.replace("{max}", String(MAX_PASSWORD_LENGTH));
+      case "no_letter_digit":
+        return t.password_error_needs_letter_digit;
+      case "personal":
+        return t.password_error_personal;
+      case "common":
+        return t.password_error_common;
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
+    if (passwordProblems.length > 0) {
+      setError(passwordIssueText(passwordProblems[0]));
+      return;
+    }
     if (password !== confirmPassword) {
       setError(t.register_password_mismatch);
       return;
@@ -41,10 +68,10 @@ export default function ResetPasswordForm({ turnstileSiteKey = "" }: { turnstile
         body: JSON.stringify({ token, password, "cf-turnstile-response": turnstileToken }),
       });
 
-      const data = await res.json() as { error?: string };
+      const data = await res.json() as { error?: string; error_code?: string };
 
       if (!res.ok) {
-        setError(data.error ?? "Something went wrong");
+        setError(translateKey(t, data.error_code, data.error) ?? data.error ?? "Something went wrong");
         return;
       }
 
@@ -138,8 +165,21 @@ export default function ResetPasswordForm({ turnstileSiteKey = "" }: { turnstile
                   onChange={(e) => setPassword(e.target.value)}
                   required
                   autoComplete="new-password"
-                  minLength={8}
+                  minLength={MIN_PASSWORD_LENGTH}
+                  maxLength={MAX_PASSWORD_LENGTH}
+                  aria-describedby="reset-password-rules"
+                  aria-invalid={password.length > 0 && passwordProblems.length > 0}
                 />
+                <p id="reset-password-rules" style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                  {t.register_password_rules
+                    .replace("{min}", String(MIN_PASSWORD_LENGTH))
+                    .replace("{max}", String(MAX_PASSWORD_LENGTH))}
+                </p>
+                {password.length > 0 && passwordProblems.length > 0 && (
+                  <p role="alert" style={{ fontSize: "0.75rem", color: "var(--danger)", margin: 0 }}>
+                    {passwordIssueText(passwordProblems[0])}
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-col gap-2">
@@ -154,8 +194,15 @@ export default function ResetPasswordForm({ turnstileSiteKey = "" }: { turnstile
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
                   autoComplete="new-password"
-                  minLength={8}
+                  minLength={MIN_PASSWORD_LENGTH}
+                  maxLength={MAX_PASSWORD_LENGTH}
+                  aria-invalid={passwordMismatch}
                 />
+                {passwordMismatch && (
+                  <p role="alert" style={{ fontSize: "0.75rem", color: "var(--danger)", margin: 0 }}>
+                    {t.register_password_mismatch}
+                  </p>
+                )}
               </div>
 
               <TurnstileWidget siteKey={turnstileSiteKey} action="reset_password" onToken={setTurnstileToken} />

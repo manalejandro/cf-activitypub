@@ -82,7 +82,15 @@ export const MAX_AP_COLLECTION_PAGE = 1000;
 export const MAX_FILTER_KEYWORDS = 50;
 /** Accounts one list add/remove request may name (Mastodon's list membership is bounded; D1 binds are not). */
 export const MAX_LIST_ACCOUNT_IDS = 500;
-export const MIN_PASSWORD_LENGTH = 8;
+/**
+ * Password floor for every surface that sets one (registration, reset). Length
+ * is the effective half of a password policy; the rest of the rules live in
+ * `lib/password-policy.ts`, shared by routes and forms so the browser cannot
+ * approve what the server rejects. 12 is the practical minimum in current
+ * guidance, and workerd caps PBKDF2 at 100k iterations (see `lib/auth.ts`), so
+ * length is what we actually have to work with.
+ */
+export const MIN_PASSWORD_LENGTH = 12;
 export const MAX_REPORT_NOTE_CHARS = 5000;
 // Safety caps for the thread context walk (ancestors / descendants).
 export const MAX_THREAD_ANCESTORS = 20;

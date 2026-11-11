@@ -8,6 +8,8 @@ import { useLocale, translateKey } from "@/lib/i18n";
 import { useAuth, setToken } from "@/lib/client-api";
 import { LanguagePicker } from "@/components/LanguagePicker";
 import TurnstileWidget, { type TurnstileHandle } from "@/components/TurnstileWidget";
+import { MAX_PASSWORD_LENGTH, passwordIssues, type PasswordIssue } from "@/lib/password-policy";
+import { MIN_PASSWORD_LENGTH } from "@/lib/constants";
 
 interface Props {
   turnstileSiteKey: string;
@@ -87,10 +89,36 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
     turnstileHandle.current?.reset();
   }
 
+  // The same rules the server applies, from the same module (`lib/password-
+  // policy.ts`): the form must never approve a password that
+  // `POST /api/v1/accounts` would reject, and the reader should see the reason
+  // while typing rather than after a round trip.
+  const passwordProblems = passwordIssues(password, [username, email]);
+  const passwordMismatch = confirmPassword.length > 0 && password !== confirmPassword;
+
+  function passwordIssueText(issue: PasswordIssue): string {
+    switch (issue) {
+      case "short":
+        return t.register_error_password_short.replace("{min}", String(MIN_PASSWORD_LENGTH));
+      case "long":
+        return t.password_error_long.replace("{max}", String(MAX_PASSWORD_LENGTH));
+      case "no_letter_digit":
+        return t.password_error_needs_letter_digit;
+      case "personal":
+        return t.password_error_personal;
+      case "common":
+        return t.password_error_common;
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!turnstileToken) {
       setError(t.turnstile_error);
+      return;
+    }
+    if (passwordProblems.length > 0) {
+      setError(passwordIssueText(passwordProblems[0]));
       return;
     }
     if (password !== confirmPassword) {
@@ -150,7 +178,10 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
         // Same contract as the login form: the HttpOnly cookie came in this
         // response's Set-Cookie; localStorage keeps the copy for WebSockets.
         setToken(data.access_token);
-        window.location.href = "/home";
+        // `assign()`, not `.href =`: the React Compiler's immutability rule
+        // rejects assigning to a global's property (and a hard navigation is
+        // what we want here, so the session-dependent shell reloads).
+        window.location.assign("/home");
       }
     } catch {
       resetTurnstile();
@@ -422,8 +453,21 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
                   onChange={(e) => setPassword(e.target.value)}
                   required
                   autoComplete="new-password"
-                  minLength={8}
+                  minLength={MIN_PASSWORD_LENGTH}
+                  maxLength={MAX_PASSWORD_LENGTH}
+                  aria-describedby="register-password-rules"
+                  aria-invalid={password.length > 0 && passwordProblems.length > 0}
                 />
+                <p id="register-password-rules" style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                  {t.register_password_rules
+                    .replace("{min}", String(MIN_PASSWORD_LENGTH))
+                    .replace("{max}", String(MAX_PASSWORD_LENGTH))}
+                </p>
+                {password.length > 0 && passwordProblems.length > 0 && (
+                  <p role="alert" style={{ fontSize: "0.75rem", color: "var(--danger)", margin: 0 }}>
+                    {passwordIssueText(passwordProblems[0])}
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-col gap-2">
@@ -438,8 +482,15 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
                   autoComplete="new-password"
-                  minLength={8}
+                  minLength={MIN_PASSWORD_LENGTH}
+                  maxLength={MAX_PASSWORD_LENGTH}
+                  aria-invalid={passwordMismatch}
                 />
+                {passwordMismatch && (
+                  <p role="alert" style={{ fontSize: "0.75rem", color: "var(--danger)", margin: 0 }}>
+                    {t.register_password_mismatch}
+                  </p>
+                )}
               </div>
 
               {regs?.reasonRequired && (

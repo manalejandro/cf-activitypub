@@ -4,7 +4,7 @@ import { deleteOAuthTokensForActor, getPasswordResetByToken, markPasswordResetUs
 import { hashPassword } from "@/lib/auth";
 import { getBaseUrl } from "@/lib/cf";
 import { enforceTurnstilePolicy } from "@/lib/turnstile";
-import { MIN_PASSWORD_LENGTH } from "@/lib/constants";
+import { validatePassword, passwordIssueCode, passwordIssueMessage } from "@/lib/password-policy";
 import { env } from "cloudflare:workers";
 
 export async function POST(request: NextRequest): Promise<Response> {
@@ -29,8 +29,12 @@ export async function POST(request: NextRequest): Promise<Response> {
     return json({ error: "token and password are required" }, 400);
   }
 
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    return json({ error: "Password must be at least 8 characters" }, 422);
+  // Same policy as registration (`lib/password-policy.ts`), so a reset cannot
+  // land on a password a new account would be refused. The own-identifier rule
+  // needs the account and is applied below, once the token resolves.
+  const issue = validatePassword(password);
+  if (issue) {
+    return json({ error: passwordIssueMessage(issue), error_code: passwordIssueCode(issue) }, 422);
   }
 
   const clientIp = request.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -58,6 +62,13 @@ export async function POST(request: NextRequest): Promise<Response> {
   if (new Date(record.expiresAt) < new Date()) {
     await markPasswordResetUsed(env.DB, token);
     return json({ error: "This reset link has expired" }, 400);
+  }
+
+  // The username is the last segment of the actor IRI, so the "must not contain
+  // your own identifier" rule costs no extra read here.
+  const personalIssue = validatePassword(password, [record.actorId.split("/").pop() ?? ""]);
+  if (personalIssue === "personal") {
+    return json({ error: passwordIssueMessage(personalIssue), error_code: passwordIssueCode(personalIssue) }, 422);
   }
 
   const passwordHash = await hashPassword(password);

@@ -110,7 +110,7 @@ describe("POST /api/auth/forgot-password", () => {
 describe("POST /api/auth/reset-password", () => {
   it("rejects a tokenless request when Turnstile is configured", async () => {
     const { POST } = await import("@/app/api/auth/reset-password/route");
-    const res = await POST(post("/api/auth/reset-password", { token: "reset", password: "password123" }) as never);
+    const res = await POST(post("/api/auth/reset-password", { token: "reset", password: "Caballo-bateria-42" }) as never);
     expect(res.status).toBe(422);
     expect((await res.json() as { error_code: string }).error_code).toBe("turnstile_error");
     expect(mocks.updatePassword).not.toHaveBeenCalled();
@@ -125,7 +125,7 @@ describe("POST /api/auth/reset-password", () => {
     const res = await POST(
       post("/api/auth/reset-password", {
         token: "reset",
-        password: "password123",
+        password: "Caballo-bateria-42",
         "cf-turnstile-response": "tok",
       }) as never
     );

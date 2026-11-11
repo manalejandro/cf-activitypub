@@ -136,10 +136,19 @@ export function requireAuth(actor: LocalActor | null): Response | null {
 //
 // Stored shape: `pbkdf2:<iterations>:<saltHex>:<hashHex>`. Hashes created
 // before the iteration count was encoded have three segments
-// (`pbkdf2:<saltHex>:<hashHex>`) and are read as LEGACY_PBKDF2_ITERATIONS;
-// a successful sign-in with one rehashes it transparently to the current cost
-// (see `needsPasswordRehash`), so existing accounts migrate as they log in.
-export const PBKDF2_ITERATIONS = 600_000; // OWASP recommendation for PBKDF2-HMAC-SHA256
+// (`pbkdf2:<saltHex>:<hashHex>`) and are read as LEGACY_PBKDF2_ITERATIONS.
+//
+// **workerd caps PBKDF2 at 100,000 iterations**: asking for more throws
+// `NotSupportedError: Pbkdf2 failed: iteration counts above 100000 are not
+// supported`, which 500'd every registration, every password reset and the
+// transparent rehash on login. Node's webcrypto (the unit-test runtime) has no
+// such cap, so only a workers-project test can pin this — see
+// test/password-hashing.workers.test.ts. OWASP's 600k recommendation for
+// PBKDF2-HMAC-SHA256 is simply unreachable on this runtime; 100k is the
+// ceiling, and the cost is stored per hash so a future runtime can raise it
+// without invalidating anything.
+export const MAX_PBKDF2_ITERATIONS = 100_000;
+export const PBKDF2_ITERATIONS = MAX_PBKDF2_ITERATIONS;
 const LEGACY_PBKDF2_ITERATIONS = 100_000;
 
 async function pbkdf2Hex(password: string, salt: Uint8Array, iterations: number): Promise<string> {
@@ -188,11 +197,18 @@ function parsePasswordHash(stored: string): { iterations: number; saltHex: strin
   return null;
 }
 
-/** Whether a stored hash predates the current cost and should be rehashed on next login. */
+/** Whether a stored hash predates the current cost (or never recorded it) and
+ *  should be rehashed on the next successful sign-in. */
 export function needsPasswordRehash(stored: string | null | undefined): boolean {
   if (!stored) return false;
   const parsed = parsePasswordHash(stored);
-  return parsed ? parsed.iterations < PBKDF2_ITERATIONS : false;
+  if (!parsed) return false;
+  // A cost above what this runtime can derive is not ours to rewrite — verify
+  // already refuses it, and rehashing would need the password anyway.
+  if (parsed.iterations > MAX_PBKDF2_ITERATIONS) return false;
+  // Legacy three-segment hashes carry no cost: rewrite them into the explicit
+  // shape even when the cost already matches, so the ambiguity dies out.
+  return parsed.iterations < PBKDF2_ITERATIONS || stored.split(":").length === 3;
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
@@ -200,6 +216,14 @@ export async function verifyPassword(password: string, stored: string): Promise<
   if (!parsed) return false;
   if (!/^[0-9a-f]+$/i.test(parsed.saltHex) || parsed.saltHex.length % 2 !== 0) return false;
   if (!/^[0-9a-f]+$/i.test(parsed.hashHex)) return false;
+  // A cost above the runtime cap cannot be recomputed here. Refuse it instead
+  // of deriving at a different cost and comparing that: such a hash can only
+  // have been written by another runtime, and the account recovers through a
+  // password reset rather than through a silently wrong comparison.
+  if (parsed.iterations > MAX_PBKDF2_ITERATIONS) {
+    console.warn(`[auth] stored hash asks for ${parsed.iterations} PBKDF2 iterations; this runtime caps at ${MAX_PBKDF2_ITERATIONS}`);
+    return false;
+  }
 
   const salt = Uint8Array.from(parsed.saltHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)));
   const computedHex = await pbkdf2Hex(password, salt, parsed.iterations);
