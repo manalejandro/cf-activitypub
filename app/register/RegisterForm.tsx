@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useLocale, translateKey } from "@/lib/i18n";
 import { useAuth, setToken } from "@/lib/client-api";
 import { LanguagePicker } from "@/components/LanguagePicker";
+import { FieldBackground } from "@/components/FieldBackground";
 import TurnstileWidget, { type TurnstileHandle } from "@/components/TurnstileWidget";
 import { MAX_PASSWORD_LENGTH, passwordIssues, type PasswordIssue } from "@/lib/password-policy";
 import { MIN_PASSWORD_LENGTH } from "@/lib/constants";
@@ -236,9 +237,12 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
   if (pendingApproval) {
     return (
       <div
-        className="force-light flex flex-col items-center justify-center min-h-screen px-4"
-        style={{ background: "var(--bg)" }}
+        className="force-light relative overflow-hidden flex flex-col items-center justify-center min-h-screen px-4"
+        style={{ background: "var(--bg)", isolation: "isolate" }}
       >
+        {/* Signature layer (see app/page.tsx): the field sits behind the card at
+            z-index -1, so the content needs no stacking context of its own. */}
+        <FieldBackground density={10} opacity={0.42} linkDistance={104} style={{ zIndex: -1 }} />
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center gap-3 mb-8">
             <Link href="/">
@@ -269,9 +273,12 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
   if (pendingEmail) {
     return (
       <div
-        className="force-light flex flex-col items-center justify-center min-h-screen px-4"
-        style={{ background: "var(--bg)" }}
+        className="force-light relative overflow-hidden flex flex-col items-center justify-center min-h-screen px-4"
+        style={{ background: "var(--bg)", isolation: "isolate" }}
       >
+        {/* Signature layer (see app/page.tsx): the field sits behind the card at
+            z-index -1, so the content needs no stacking context of its own. */}
+        <FieldBackground density={10} opacity={0.42} linkDistance={104} style={{ zIndex: -1 }} />
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center gap-3 mb-8">
             <Link href="/">
@@ -324,9 +331,12 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
   if (regs && (!regs.enabled || regs.url)) {
     return (
       <div
-        className="force-light flex flex-col items-center justify-center min-h-screen px-4"
-        style={{ background: "var(--bg)" }}
+        className="force-light relative overflow-hidden flex flex-col items-center justify-center min-h-screen px-4"
+        style={{ background: "var(--bg)", isolation: "isolate" }}
       >
+        {/* Signature layer (see app/page.tsx): the field sits behind the card at
+            z-index -1, so the content needs no stacking context of its own. */}
+        <FieldBackground density={10} opacity={0.42} linkDistance={104} style={{ zIndex: -1 }} />
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center gap-3 mb-8">
             <Link href="/">
@@ -368,9 +378,12 @@ export default function RegisterForm({ turnstileSiteKey }: Props) {
   return (
     <>
       <div
-        className="force-light flex flex-col items-center justify-center min-h-screen px-4"
-        style={{ background: "var(--bg)" }}
+        className="force-light relative overflow-hidden flex flex-col items-center justify-center min-h-screen px-4"
+        style={{ background: "var(--bg)", isolation: "isolate" }}
       >
+        {/* Signature layer (see app/page.tsx): the field sits behind the card at
+            z-index -1, so the content needs no stacking context of its own. */}
+        <FieldBackground density={10} opacity={0.42} linkDistance={104} style={{ zIndex: -1 }} />
         {/* Language selector */}
         <div style={{ position: "absolute", top: "1rem", right: "1rem" }}>
           <LanguagePicker />

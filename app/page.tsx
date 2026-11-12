@@ -10,6 +10,7 @@ import { LanguagePicker } from "@/components/LanguagePicker";
 import { Icon, type IconName } from "@/components/Icon";
 import { RichText } from "@/components/RichText";
 import { useAnonymousTimelineAccess } from "@/lib/limits-client";
+import { FieldBackground } from "@/components/FieldBackground";
 
 interface InstanceSettings {
   rules?: { id: string; text: string; html: string }[];
@@ -97,6 +98,19 @@ export default function Home() {
           style={{
             position: "absolute", inset: 0, zIndex: -1,
             background: "linear-gradient(180deg, rgba(15,23,42,0.5) 0%, rgba(15,23,42,0.78) 100%)",
+          }}
+        />
+        {/* Signature layer: the instance's flow field drifting over the cover
+            art. The tints are overridden locally because this hero sits on a
+            dark wash, not on the page surface. */}
+        <FieldBackground
+          density={13}
+          opacity={0.6}
+          linkDistance={112}
+          style={{
+            zIndex: 0,
+            ["--accent" as string]: "#cbcfff",
+            ["--text-muted" as string]: "#8e95c6",
           }}
         />
 

@@ -26,7 +26,12 @@ export function Loading({ text, compact = false }: { text?: string; compact?: bo
         fontSize: compact ? "0.85rem" : "0.9rem",
       }}
     >
-      <Icon name="spinner" spin size={compact ? "0.95rem" : "1.4rem"} />
+      {compact ? (
+        <Icon name="spinner" spin size="0.95rem" />
+      ) : (
+        // Full-page loads wear the field's motif instead of a generic spinner.
+        <span className="field-loader" aria-hidden="true"><i /><i /><i /></span>
+      )}
       <span>{text ?? t.loading}</span>
     </div>
   );

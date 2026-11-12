@@ -521,6 +521,23 @@ img.emojione { display: inline; vertical-align: middle; }
 }
 .graph-page .react-flow__attribution { display: none; }
 
+/* Loader in the field's own language: three dots drifting through the flow
+   instead of a generic spinner. Purely decorative — the label next to it
+   carries the state for screen readers, and the global reduced-motion block
+   below resolves it to a still frame. */
+.field-loader { display: inline-flex; align-items: center; gap: 0.34rem; }
+.field-loader i {
+  display: block; width: 0.42rem; height: 0.42rem; border-radius: 50%;
+  background: var(--accent);
+  animation: field-dot 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.field-loader i:nth-child(2) { animation-delay: 0.16s; }
+.field-loader i:nth-child(3) { animation-delay: 0.32s; }
+@keyframes field-dot {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(0.8); opacity: 0.42; }
+  45% { transform: translate3d(0, -0.3rem, 0) scale(1); opacity: 1; }
+}
+
 /* Respect the OS "reduce motion" preference: decorative loops (skeletons,
    pulses, fades) resolve to their final state instead of animating, and
    smooth scrolling becomes instant. */

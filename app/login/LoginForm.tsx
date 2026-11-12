@@ -8,6 +8,7 @@ import { useLocale, translateKey } from "@/lib/i18n";
 import { useAuth, setToken, ensureToken } from "@/lib/client-api";
 import { sameOriginRedirect } from "@/lib/safe-url";
 import { LanguagePicker } from "@/components/LanguagePicker";
+import { FieldBackground } from "@/components/FieldBackground";
 import TurnstileWidget, { type TurnstileHandle } from "@/components/TurnstileWidget";
 
 interface Props {
@@ -217,9 +218,12 @@ export default function LoginForm({ turnstileSiteKey }: Props) {
   return (
     <>
       <div
-        className="force-light flex flex-col items-center justify-center min-h-screen px-4"
-        style={{ background: "var(--bg)" }}
+        className="force-light relative overflow-hidden flex flex-col items-center justify-center min-h-screen px-4"
+        style={{ background: "var(--bg)", isolation: "isolate" }}
       >
+        {/* Signature layer (see app/page.tsx): the field sits behind the card at
+            z-index -1, so the content needs no stacking context of its own. */}
+        <FieldBackground density={10} opacity={0.42} linkDistance={104} style={{ zIndex: -1 }} />
         {/* Language selector */}
         <div style={{ position: "absolute", top: "1rem", right: "1rem" }}>
           <LanguagePicker />
