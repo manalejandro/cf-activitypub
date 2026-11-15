@@ -59,7 +59,13 @@ export async function GET(request: NextRequest): Promise<Response> {
     binds.push(`%${q}%`, `%${q}%`);
   }
 
-  sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  // The suspended table is read as "when did this happen", and `suspended_at` is
+  // the column on screen: ordering it by account age made the dates look
+  // shuffled. NULLs (rows suspended before the column existed) sort last on
+  // DESC, which is where they belong.
+  sql += status === "suspended"
+    ? " ORDER BY suspended_at DESC LIMIT ? OFFSET ?"
+    : " ORDER BY created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
 
   let rows: Record<string, unknown>[] = [];

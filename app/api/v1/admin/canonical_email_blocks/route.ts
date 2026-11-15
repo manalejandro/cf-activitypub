@@ -12,10 +12,13 @@ import { generateId } from "@/lib/activitypub/utils";
 import { env } from "cloudflare:workers";
 
 // GET /api/v1/admin/canonical_email_blocks — mailboxes that cannot register.
+// Moderators may READ the list, like the relays and instances sections: a
+// blocked mailbox explains a rejected sign-up, and support needs to see it.
+// The mutations below stay full-admin — a block silently refuses registrations.
 export async function GET(request: NextRequest): Promise<Response> {
   const role = await getAdminRole(request, env);
-  if (role !== "admin") {
-    return json({ error: role ? "Administrator role required" : "Unauthorized" }, role ? 403 : 401);
+  if (!role) {
+    return json({ error: "Unauthorized" }, 401);
   }
   const blocks = await listCanonicalEmailBlocks(env.DB);
   return json(
