@@ -5,7 +5,7 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { MAX_REMOTE_ATTACHMENTS } from "@/lib/constants";
 import type { APActivity, APNote, APActor, APObject, APAttachment, LocalAttachment, LocalActor } from "@/lib/types";
-import type { CallSession } from "@/lib/types/call";
+import type { CallEventPayload, CallSession, CallType } from "@/lib/types/call";
 import {
   getActorById,
   getActorByUsername,
@@ -62,6 +62,14 @@ import { featureAuthorizationIRI, syncRemoteCollections } from "./collections";
 import { recordInstanceInboundActivity } from "./instances";
 import { relayForActor, relayMatchesFollowAnswer, acceptedRelayForSigner } from "./relays";
 import { evaluateReportWithAI } from "@/lib/moderation/reportAI";
+import { evaluateCallPermission } from "@/lib/calls/policy";
+import { buildCallNotification, updateCallNotificationStatus } from "@/lib/calls/notifications";
+import {
+  clearCallActiveMarkers,
+  getCallSession,
+  saveCallSession,
+  setCallActiveMarkers,
+} from "@/lib/calls/session";
 import { notifyReportedAccount } from "@/lib/moderation/actions";
 import { broadcastNotificationEvent, broadcastPublicStatus, broadcastHomeStatus, broadcastEvent, broadcastObjectDelete, broadcastStatusInteraction, broadcastStatusInteractionToLists, broadcastStatusCreatedToAudience, broadcastAccountUpdate, eligibleLocalRecipients, actorExclusion, parentExclusion } from "@/lib/streaming/broadcast";
 import { deliverPushSafe } from "@/lib/push";
@@ -100,7 +108,7 @@ import {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DONamespace = { idFromName(name: string): any; get(id: any): { fetch(input: string | URL, init?: RequestInit): Promise<Response> } };
-type KVNamespace = { get(key: string): Promise<string | null>; put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void> };
+type KVNamespace = { get(key: string): Promise<string | null>; put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>; delete(key: string): Promise<void> };
 
 interface InboxContext {
   db: D1Database;
@@ -176,7 +184,10 @@ async function serializeFullNotification(ctx: InboxContext, notif: LocalNotifica
     const [fromActor, target, object] = await Promise.all([
       getActorById(ctx.db, notif.accountId),
       getActorById(ctx.db, notif.targetAccountId),
-      notif.objectId ? getObjectById(ctx.db, notif.objectId) : Promise.resolve(null),
+      // A call notification's objectId is the call UUID, never an object row.
+      notif.type !== "call" && notif.objectId
+        ? getObjectById(ctx.db, notif.objectId)
+        : Promise.resolve(null),
     ]);
     if (!fromActor) return "{}";
     const localDomain = target?.isLocal && target.domain ? target.domain : new URL(ctx.baseUrl).hostname;
@@ -357,6 +368,15 @@ export async function processInboxActivity(
         break;
       case "callhangup":
         await handleCallHangup(activity, ctx);
+        break;
+      case "callreject":
+        await handleCallReject(activity, ctx);
+        break;
+      case "callpending":
+        await handleCallPending(activity, ctx);
+        break;
+      case "callringing":
+        await handleCallRinging(activity, ctx);
         break;
       case "callrenegotiate":
         await handleCallRenegotiate(activity, ctx);
@@ -2810,77 +2830,216 @@ async function authorizeCallEvent(ctx: InboxContext, activity: APActivity, callI
   }
 }
 
+/**
+ * Send a call-control activity back to the other party.
+ *
+ * Only federated peers need this: a local peer is told through the streaming
+ * DO by the REST route. Signed by the local account the activity was
+ * addressed to (`ctx.recipient`), which is the account that owns the call
+ * session on this instance.
+ */
+async function sendCallActivity(
+  ctx: InboxContext,
+  type: "CallPending" | "CallRinging" | "CallReject",
+  toActorId: string,
+  callId: string,
+  extra: Record<string, unknown> = {}
+): Promise<void> {
+  const recipient = ctx.recipient;
+  if (!ctx.deliveryQueue || !recipient?.privateKeyPem) return;
+  const peer = await getActorById(ctx.db, toActorId);
+  // A local peer is reached through the stream; a federated one through its
+  // inbox (the actor is cached by now — the offer's caller).
+  if (peer?.isLocal) return;
+  const inbox = peer?.inbox ?? `${toActorId}/inbox`;
+  const activity = {
+    "@context": "https://www.w3.org/ns/activitystreams",
+    id: `${ctx.baseUrl}/calls/${callId}#${type.toLowerCase()}-${Date.now()}`,
+    type,
+    actor: recipient.id,
+    to: [toActorId],
+    object: {
+      type: "CallSession",
+      id: `${ctx.baseUrl}/calls/${callId}`,
+      ...extra,
+    },
+  };
+  await enqueueDeliveries(
+    ctx.deliveryQueue,
+    [inbox],
+    JSON.stringify(activity),
+    recipient.id,
+    `${recipient.id}#main-key`,
+    recipient.privateKeyPem
+  ).catch(() => {});
+}
+
+/** Normalize the media kind of an inbound offer (unknown values are audio). */
+function callTypeFromOffer(raw: unknown): CallType {
+  return raw === "video" || raw === "screen" ? raw : "audio";
+}
+
+/**
+ * An inbound offer from a remote caller.
+ *
+ * The callee's policy is enforced here, exactly as `POST /api/v1/calls`
+ * enforces it for a local caller: a refusal travels back as `CallReject`, a
+ * `request` policy holds the offer (the caller waits in "requesting") until
+ * the callee approves with `CallRinging`, and an allowed call rings now.
+ *
+ * The notification is written on arrival, not on answer, so a callee who was
+ * offline still finds out they missed a call.
+ */
 async function handleCallOffer(activity: APActivity, ctx: InboxContext): Promise<void> {
-  if (!ctx.timelineStream || !ctx.recipient) return;
+  // A shared-inbox delivery names the callee in `to`; resolve it first.
+  ctx = await resolveCtxRecipient(activity, ctx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const obj = activity.object as Record<string, any> | undefined;
   if (!obj) return;
 
-  const callerIRI = typeof activity.actor === "string" ? activity.actor : (activity.actor as APActor).id;
+  const callerIRI = activityActorId(activity);
+  if (!callerIRI || !activityHostsMatch(activity, callerIRI, ctx)) return;
   const callee = ctx.recipient;
+  if (!callee) return;
+
+  const callId = (typeof obj.id === "string" ? obj.id : "").split("/").pop() ?? "";
+  if (!callId) return;
+  const callType = callTypeFromOffer(obj.callType);
+  const offerSdp = typeof obj.sdp === "string" ? obj.sdp : "";
+  if (!offerSdp) return;
 
   // A blocked (or domain-blocked) caller must not ring the callee's overlay
   // nor write call sessions into KV.
-  if (await isActorBlockedBy(ctx.db, callee.id, callerIRI)) return;
+  if (await isActorBlockedBy(ctx.db, callee.id, callerIRI)) {
+    await sendCallActivity(ctx, "CallReject", callerIRI, callId, { reason: "blocked" });
+    return;
+  }
 
-  // Resolve display info for the caller
   const callerActor = await getActorById(ctx.db, callerIRI);
   const callerAcct = callerActor
-    ? (callerActor.domain === new URL(ctx.baseUrl).hostname
-        ? callerActor.username
-        : `${callerActor.username}@${callerActor.domain}`)
+    ? (callerActor.isLocal ? callerActor.username : `${callerActor.username}@${callerActor.domain}`)
     : callerIRI;
 
-  // Extract call ID from the object IRI (last path segment)
-  const callId = (obj.id as string ?? "").split("/").pop() ?? crypto.randomUUID();
-  const callType = (obj.callType ?? "audio") as "audio" | "video" | "screen";
-  const offerSdp = (obj.sdp ?? "") as string;
+  const permission = await evaluateCallPermission({
+    db: ctx.db,
+    kv: ctx.kv,
+    calleeId: callee.id,
+    callerId: callerIRI,
+    callType,
+    callerSilenced: Boolean(callerActor?.silenced),
+  });
+
+  if (permission.result === "denied") {
+    await sendCallActivity(ctx, "CallReject", callerIRI, callId, { reason: permission.reason });
+    return;
+  }
+
+  // A retried offer must never reset a session that already progressed, and a
+  // callee already in a call cannot be rung a second time.
+  const existing = ctx.kv ? await getCallSession(ctx.kv, callId) : null;
+  if (existing) {
+    if (existing.callerId === callerIRI && existing.calleeId === callee.id && existing.state === "requested") {
+      // Re-answer the retry with the current progress; state is untouched.
+      await sendCallActivity(ctx, "CallPending", callerIRI, callId);
+    }
+    return;
+  }
+  const calleeBusy = ctx.kv ? await ctx.kv.get(`call:active:${callee.id}`) : null;
+  if (calleeBusy && calleeBusy !== callId) {
+    await sendCallActivity(ctx, "CallReject", callerIRI, callId, { reason: "busy" });
+    return;
+  }
+
+  const requiresApproval = permission.result === "approval_required";
 
   // Persist a local call session so the callee can POST the answer/ICE to our
   // own /api/v1/calls/{id} endpoint (the session only exists on the caller's
   // instance otherwise, causing 404s).
+  const session: CallSession = {
+    id: callId,
+    callerId: callerIRI,
+    calleeId: callee.id,
+    callerAcct,
+    calleeAcct: callee.username,
+    callType,
+    offerSdp,
+    answerSdp: null,
+    state: requiresApproval ? "requested" : "pending",
+    createdAt: new Date().toISOString(),
+  };
   if (ctx.kv) {
-    const session: CallSession = {
-      id: callId,
-      callerId: callerIRI,
-      calleeId: callee.id,
-      callerAcct,
-      calleeAcct: callee.username,
-      callType,
-      offerSdp,
-      answerSdp: null,
-      state: "pending",
-      createdAt: new Date().toISOString(),
-    };
-    await ctx.kv.put(`call:${callId}`, JSON.stringify(session), { expirationTtl: 600 });
+    await saveCallSession(ctx.kv, session);
+    // Both peers are busy from the moment the session exists, so neither can
+    // start a parallel call while this one rings.
+    await setCallActiveMarkers(ctx.kv, session);
   }
 
-  await broadcastEvent(ctx.timelineStream, callee.id, "call", {
-    type: "call.incoming",
+  // One notification per call, created on arrival and updated in place as the
+  // call progresses: the outcome of a call the callee never saw is the record.
+  const notif = buildCallNotification({
     callId,
+    callerId: callerIRI,
+    calleeId: callee.id,
     callType,
-    callerAcct,
-    callerDisplayName: callerActor?.displayName ?? callerActor?.username ?? callerAcct,
-    callerAvatar: callerActor?.avatarUrl ?? null,
-    offerSdp,
+    status: requiresApproval ? "requested" : "ringing",
   });
+  if (await createNotification(ctx.db, notif)) {
+    await broadcastAndPush(ctx, notif);
+  }
+
+  if (ctx.timelineStream) {
+    await broadcastEvent(ctx.timelineStream, callee.id, "call", {
+      type: requiresApproval ? "call.request" : "call.incoming",
+      callId,
+      callType,
+      callerAcct,
+      callerDisplayName: callerActor?.displayName ?? callerActor?.username ?? callerAcct,
+      callerAvatar: callerActor?.avatarUrl ?? null,
+      offerSdp,
+    } satisfies CallEventPayload);
+  }
+
+  // The caller's instance holds the session: tell it whether the offer is
+  // ringing or waiting for approval.
+  if (requiresApproval) {
+    await sendCallActivity(ctx, "CallPending", callerIRI, callId);
+  }
 }
 
 async function handleCallAnswer(activity: APActivity, ctx: InboxContext): Promise<void> {
   ctx = await resolveCtxRecipient(activity, ctx);
-  if (!ctx.timelineStream || !ctx.recipient) return;
+  if (!ctx.recipient) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const obj = activity.object as Record<string, any> | undefined;
   if (!obj) return;
 
-  const callId = (obj.id as string ?? "").split("/").pop() ?? "";
+  const callId = (typeof obj.id === "string" ? obj.id : "").split("/").pop() ?? "";
   if (!(await authorizeCallEvent(ctx, activity, callId))) return;
 
-  await broadcastEvent(ctx.timelineStream, ctx.recipient.id, "call", {
-    type: "call.answered",
-    callId,
-    answerSdp: obj.sdp ?? "",
-  });
+  const answerSdp = typeof obj.sdp === "string" ? obj.sdp : "";
+  if (!answerSdp) return;
+
+  // The callee (remote) answered our offer: the call is active on both sides.
+  // A late answer must not reopen a call that already ended, and only the
+  // callee can answer (a caller-signed CallAnswer is a forgery).
+  const session = ctx.kv ? await getCallSession(ctx.kv, callId) : null;
+  if (!session) return;
+  if (session.state === "ended" || session.state === "rejected" || session.state === "active") return;
+  if (activityActorId(activity) !== session.calleeId) return;
+  if (ctx.kv) {
+    session.answerSdp = answerSdp;
+    session.state = "active";
+    await saveCallSession(ctx.kv, session);
+    await setCallActiveMarkers(ctx.kv, session);
+  }
+
+  if (ctx.timelineStream) {
+    await broadcastEvent(ctx.timelineStream, ctx.recipient.id, "call", {
+      type: "call.answered",
+      callId,
+      answerSdp,
+    } satisfies CallEventPayload);
+  }
 }
 
 async function handleCallIceCandidate(activity: APActivity, ctx: InboxContext): Promise<void> {
@@ -2890,14 +3049,23 @@ async function handleCallIceCandidate(activity: APActivity, ctx: InboxContext): 
   const obj = activity.object as Record<string, any> | undefined;
   if (!obj) return;
 
-  const callId = (obj.id as string ?? "").split("/").pop() ?? "";
+  const callId = (typeof obj.id === "string" ? obj.id : "").split("/").pop() ?? "";
   if (!callId) return;
   if (!(await authorizeCallEvent(ctx, activity, callId))) return;
 
-  const candidate = obj.candidate
-    ? (typeof obj.candidate === "string" ? JSON.parse(obj.candidate) : obj.candidate)
-    : null;
-  if (!candidate) return;
+  // A malformed candidate string must be dropped, never thrown: one bad peer
+  // would otherwise fail the whole inbox delivery.
+  let candidate: unknown = null;
+  if (typeof obj.candidate === "string") {
+    try {
+      candidate = JSON.parse(obj.candidate);
+    } catch {
+      return;
+    }
+  } else if (obj.candidate) {
+    candidate = obj.candidate;
+  }
+  if (!candidate || typeof candidate !== "object") return;
 
   // Relay via streaming for real-time delivery to the recipient
   if (ctx.timelineStream) {
@@ -2905,23 +3073,134 @@ async function handleCallIceCandidate(activity: APActivity, ctx: InboxContext): 
       type: "call.ice",
       callId,
       candidate,
-    });
+    } satisfies CallEventPayload);
   }
 }
 
+/**
+ * The peer hung up. The session must be closed here too (otherwise the callee
+ * keeps a ringing overlay and both sides stay marked busy), and the callee's
+ * record keeps the outcome the failed call earned.
+ */
 async function handleCallHangup(activity: APActivity, ctx: InboxContext): Promise<void> {
   ctx = await resolveCtxRecipient(activity, ctx);
   if (!ctx.recipient) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const obj = activity.object as Record<string, any> | undefined;
-  const callId = (obj?.id as string ?? "").split("/").pop() ?? "";
+  const callId = (typeof obj?.id === "string" ? obj.id : "").split("/").pop() ?? "";
   if (!(await authorizeCallEvent(ctx, activity, callId))) return;
+
+  const session = ctx.kv ? await getCallSession(ctx.kv, callId) : null;
+  if (session && ctx.kv) {
+    if (session.state !== "ended" && session.state !== "rejected") {
+      // Only the callee has a record to update: for the caller the remote
+      // callee's instance owns the notification.
+      if (session.calleeId === ctx.recipient.id) {
+        await updateCallNotificationStatus(
+          ctx.db,
+          callId,
+          session.calleeId,
+          session.state === "requested"
+            ? "unanswered"
+            : session.state === "active"
+              ? "answered"
+              : "missed"
+        );
+      }
+      session.state = "ended";
+      await saveCallSession(ctx.kv, session);
+      await clearCallActiveMarkers(ctx.kv, session);
+    }
+  }
 
   if (ctx.timelineStream) {
     await broadcastEvent(ctx.timelineStream, ctx.recipient.id, "call", {
       type: "call.ended",
       callId,
-    });
+    } satisfies CallEventPayload);
+  }
+}
+
+/** The remote callee refused a held request (or the call outright). */
+async function handleCallReject(activity: APActivity, ctx: InboxContext): Promise<void> {
+  ctx = await resolveCtxRecipient(activity, ctx);
+  if (!ctx.recipient) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obj = activity.object as Record<string, any> | undefined;
+  const callId = (typeof obj?.id === "string" ? obj.id : "").split("/").pop() ?? "";
+  if (!(await authorizeCallEvent(ctx, activity, callId))) return;
+
+  const session = ctx.kv ? await getCallSession(ctx.kv, callId) : null;
+  if (session && ctx.kv) {
+    session.state = "rejected";
+    await saveCallSession(ctx.kv, session);
+    await clearCallActiveMarkers(ctx.kv, session);
+    // The local account may be either side here; the callee's record only
+    // exists when the call was placed *to* us (a local requester refused us).
+    if (session.calleeId === ctx.recipient.id) {
+      await updateCallNotificationStatus(ctx.db, callId, session.calleeId, "declined");
+    }
+  }
+
+  if (ctx.timelineStream) {
+    // Carry the peer's reason (`blocked`, `nobody`, `media_disabled`, `busy`)
+    // so the caller sees why instead of a generic "declined".
+    const reason = typeof obj?.reason === "string" ? obj.reason : undefined;
+    await broadcastEvent(ctx.timelineStream, ctx.recipient.id, "call", {
+      type: "call.rejected",
+      callId,
+      ...(reason ? { reason } : {}),
+    } satisfies CallEventPayload);
+  }
+}
+
+/**
+ * Our held offer was accepted (`CallRinging`) or is now waiting for the remote
+ * callee's approval (`CallPending`). Both are progress reports for the caller.
+ */
+async function handleCallPending(activity: APActivity, ctx: InboxContext): Promise<void> {
+  ctx = await resolveCtxRecipient(activity, ctx);
+  if (!ctx.recipient || !ctx.kv) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obj = activity.object as Record<string, any> | undefined;
+  const callId = (typeof obj?.id === "string" ? obj.id : "").split("/").pop() ?? "";
+  if (!(await authorizeCallEvent(ctx, activity, callId))) return;
+
+  const session = await getCallSession(ctx.kv, callId);
+  if (!session || session.state !== "pending" && session.state !== "requested") return;
+  session.state = "requested";
+  await saveCallSession(ctx.kv, session);
+
+  if (ctx.timelineStream) {
+    await broadcastEvent(ctx.timelineStream, ctx.recipient.id, "call", {
+      type: "call.pending",
+      callId,
+    } satisfies CallEventPayload);
+  }
+}
+
+async function handleCallRinging(activity: APActivity, ctx: InboxContext): Promise<void> {
+  ctx = await resolveCtxRecipient(activity, ctx);
+  if (!ctx.recipient || !ctx.kv) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obj = activity.object as Record<string, any> | undefined;
+  const callId = (typeof obj?.id === "string" ? obj.id : "").split("/").pop() ?? "";
+  if (!(await authorizeCallEvent(ctx, activity, callId))) return;
+
+  const session = await getCallSession(ctx.kv, callId);
+  // Only a held request moves to "ringing": a late CallRinging must never
+  // downgrade an active (answered) or finished call.
+  if (!session || (session.state !== "requested" && session.state !== "pending")) return;
+  // The remote callee approved a held request: the call rings on their side
+  // now, so the caller leaves "requesting" and waits for the answer.
+  session.state = "pending";
+  await saveCallSession(ctx.kv, session);
+
+  if (ctx.timelineStream) {
+    await broadcastEvent(ctx.timelineStream, ctx.recipient.id, "call", {
+      type: "call.ringing",
+      callId,
+    } satisfies CallEventPayload);
   }
 }
 

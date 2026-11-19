@@ -85,7 +85,7 @@ function snippet(html: string | null | undefined, max = 120): string {
 const TYPE_MAP: Record<string, string> = {
   mention: "mention", follow: "follow", follow_request: "follow_request",
   favourite: "favourite", reblog: "reblog", poll: "poll", update: "update",
-  direct: "direct", encrypted: "encrypted",
+  direct: "direct", encrypted: "encrypted", call: "call",
 };
 
 export async function deliverPushNotification(
@@ -124,7 +124,9 @@ export async function deliverPushNotification(
   // user's stored UI locale (ui:locale preference), defaulting to English.
   const [actorRow, objectRow, localeRow] = await Promise.all([
     db.prepare("SELECT username, domain FROM actors WHERE id = ?").bind(notif.accountId).first<{ username: string; domain: string }>(),
-    notif.objectId
+    // A call's objectId is the call id (a UUID), not an object IRI: there is
+    // nothing to preview in `objects`.
+    notif.objectId && notif.type !== "call"
       ? db.prepare("SELECT content FROM objects WHERE id = ?").bind(notif.objectId).first<{ content: string | null }>()
       : Promise.resolve(null),
     db.prepare("SELECT value FROM preferences WHERE actor_id = ? AND key = 'ui:locale'").bind(notif.targetAccountId).first<{ value: string }>(),
@@ -136,7 +138,15 @@ export async function deliverPushNotification(
   // from the user's locale instead of a (missing) post preview.
   const bodyText = notif.type === "moderation"
     ? [who, dict.notif_moderation].filter(Boolean).join(" · ")
-    : preview ? `${who ? `${who} · ` : ""}${preview}` : who;
+    : notif.type === "call"
+      // "who · video call · missed" — the media kind and the outcome are the
+      // information the callee needs when the push is all they see.
+      ? [
+          who,
+          notif.callType ? dict[`notif_call_${notif.callType}`] : "",
+          notif.callStatus ? dict[`notif_call_${notif.callStatus}`] : "",
+        ].filter(Boolean).join(" · ")
+      : preview ? `${who ? `${who} · ` : ""}${preview}` : who;
 
   const payload = strBuf(JSON.stringify({
     title: notifTitle(dict, notif.type),
@@ -145,7 +155,13 @@ export async function deliverPushNotification(
     badge: "/icons/badge-96.png",
     tag: `notif-${notif.id}`,
     sound: Boolean(sub.sound),
-    data: { type: notif.type, account_id: notif.accountId, notification_id: notif.id, object_id: notif.objectId },
+    data: {
+      type: notif.type,
+      account_id: notif.accountId,
+      notification_id: notif.id,
+      object_id: notif.objectId,
+      ...(notif.type === "call" ? { call_status: notif.callStatus, call_type: notif.callType } : {}),
+    },
   }));
 
   const payloadU8 = new Uint8Array(payload);

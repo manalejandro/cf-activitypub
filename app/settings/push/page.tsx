@@ -17,7 +17,15 @@ interface PushSubscriptionData {
   server_key: string;
 }
 
-type NotificationType = "follow" | "favourite" | "reblog" | "mention" | "poll" | "direct" | "encrypted";
+type NotificationType =
+  | "follow"
+  | "favourite"
+  | "reblog"
+  | "mention"
+  | "poll"
+  | "direct"
+  | "encrypted"
+  | "call";
 
 const NOTIFICATION_TYPES: { key: NotificationType; labelKey: keyof Translations }[] = [
   { key: "follow", labelKey: "notif_type_follow" },
@@ -27,6 +35,7 @@ const NOTIFICATION_TYPES: { key: NotificationType; labelKey: keyof Translations 
   { key: "poll", labelKey: "notif_type_poll" },
   { key: "direct", labelKey: "notif_type_direct" },
   { key: "encrypted", labelKey: "notif_type_encrypted" },
+  { key: "call", labelKey: "notif_type_call" },
 ];
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {

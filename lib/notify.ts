@@ -28,7 +28,10 @@ async function serializeFullNotification(
     const [fromActor, target, object] = await Promise.all([
       getActorById(db, notif.accountId),
       getActorById(db, notif.targetAccountId),
-      notif.objectId ? getObjectById(db, notif.objectId) : Promise.resolve(null),
+      // A call notification's objectId is the call UUID, never an object row.
+      notif.type !== "call" && notif.objectId
+        ? getObjectById(db, notif.objectId)
+        : Promise.resolve(null),
     ]);
     if (!fromActor) return "{}";
     const localDomain = target?.isLocal && target.domain ? target.domain : fallbackDomain;

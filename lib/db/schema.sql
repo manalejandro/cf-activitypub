@@ -496,6 +496,11 @@ CREATE TABLE IF NOT EXISTS notifications (
   -- account is stored but flagged, hidden from the list and never pushed,
   -- unless the recipient follows the sender.
   filtered          INTEGER NOT NULL DEFAULT 0,
+  -- Call notifications only: the call is object_id (a UUID, not an object IRI)
+  -- and these record its outcome. The row is created when the offer arrives and
+  -- updated in place, so a call always leaves a record.
+  call_status       TEXT,
+  call_type         TEXT,
   created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

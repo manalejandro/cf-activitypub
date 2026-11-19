@@ -924,6 +924,12 @@ export function serializeNotification(
   };
   // Mastodon exposes `filtered` only when the notification is filtered.
   if (notif.filtered) result.filtered = true;
+  // A call notification carries the recorded outcome and media kind: the call
+  // itself has no status to look up (`objectId` is the call id).
+  if (notif.type === "call") {
+    if (notif.callStatus) result.call_status = notif.callStatus;
+    if (notif.callType) result.call_type = notif.callType;
+  }
   if (status && statusAuthor) {
     result.status = serializeStatus(status, statusAuthor, localDomain, {
       filtered: filtered ?? [],

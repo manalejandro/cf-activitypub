@@ -36,7 +36,12 @@ export async function GET(request: NextRequest): Promise<Response> {
   // Objects are resolved once here and reused for the enrichment maps AND the
   // serialization below — the old code fetched each object twice and each actor
   // (sender + author) per row, ~80 D1 round trips for a page of 20.
-  const objectIds = notifications.map((n) => n.objectId).filter((v): v is string => !!v);
+  // A call notification's objectId is the call id (a UUID), never an object
+  // IRI: skip it so the batch lookup does not probe `objects` for it.
+  const objectIds = notifications
+    .filter((n) => n.type !== "call")
+    .map((n) => n.objectId)
+    .filter((v): v is string => !!v);
   const objectMap = await getObjectsByIds(env.DB, objectIds);
   const notifObjects = [...objectMap.values()];
   const filteredMap = await getFilterResultsForStatuses(env.DB, actor.id, notifObjects);

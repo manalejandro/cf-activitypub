@@ -20,6 +20,12 @@ interface Preferences {
   "posting:default:license": string;
   "reading:expand:media": string;
   "reading:expand:spoilers": boolean;
+  // Calls: who may ring this account, the media they may use and playback volume.
+  "calls:policy": string;
+  "calls:allow_audio": boolean;
+  "calls:allow_video": boolean;
+  "calls:allow_screen": boolean;
+  "calls:volume": number;
 }
 
 interface Me {
@@ -239,6 +245,70 @@ export default function SettingsPage() {
               onChange={(e) => update("reading:expand:spoilers", e.target.checked)}
             />
             <label htmlFor="spoilers" style={{ fontSize: "0.875rem" }}>{t.settings_expand_spoilers}</label>
+          </div>
+
+          {/* Calls: the reachability policy, the media callers may use and the
+              playback volume. Enforced by lib/calls/policy.ts on both the local
+              and the federated path. */}
+          <div>
+            <label style={{ display: "block", fontWeight: 600, fontSize: "0.875rem", marginBottom: "0.375rem" }}>{t.settings_calls}</label>
+            <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: "0 0 0.5rem" }}>{t.settings_calls_hint}</p>
+            <select
+              className="input"
+              aria-label={t.settings_calls_policy}
+              value={prefs?.["calls:policy"] ?? "nobody"}
+              onChange={(e) => update("calls:policy", e.target.value)}
+              style={{ width: "100%" }}
+            >
+              <option value="nobody">{t.calls_policy_nobody}</option>
+              <option value="request">{t.calls_policy_request}</option>
+              <option value="everyone">{t.calls_policy_everyone}</option>
+            </select>
+            <div className="flex flex-col gap-2" style={{ marginTop: "0.75rem" }}>
+              <span style={{ fontSize: "0.8rem", fontWeight: 600 }}>{t.settings_calls_media}</span>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="calls-audio"
+                  checked={prefs?.["calls:allow_audio"] ?? true}
+                  onChange={(e) => update("calls:allow_audio", e.target.checked)}
+                />
+                <label htmlFor="calls-audio" style={{ fontSize: "0.875rem" }}>{t.settings_calls_allow_audio}</label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="calls-video"
+                  checked={prefs?.["calls:allow_video"] ?? true}
+                  onChange={(e) => update("calls:allow_video", e.target.checked)}
+                />
+                <label htmlFor="calls-video" style={{ fontSize: "0.875rem" }}>{t.settings_calls_allow_video}</label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="calls-screen"
+                  checked={prefs?.["calls:allow_screen"] ?? true}
+                  onChange={(e) => update("calls:allow_screen", e.target.checked)}
+                />
+                <label htmlFor="calls-screen" style={{ fontSize: "0.875rem" }}>{t.settings_calls_allow_screen}</label>
+              </div>
+            </div>
+            <div style={{ marginTop: "0.75rem" }}>
+              <label htmlFor="calls-volume" style={{ display: "block", fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                {t.settings_calls_volume} · {prefs?.["calls:volume"] ?? 100}%
+              </label>
+              <input
+                id="calls-volume"
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={prefs?.["calls:volume"] ?? 100}
+                onChange={(e) => update("calls:volume", Number(e.target.value))}
+                style={{ width: "100%" }}
+              />
+            </div>
           </div>
 
           <div className="flex items-center gap-2">

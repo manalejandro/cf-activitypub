@@ -32,9 +32,12 @@ interface Account {
 
 interface Notification {
   id: string;
-  type: "follow" | "follow_request" | "mention" | "reblog" | "favourite" | "poll" | "update" | "direct" | "encrypted" | "quote" | "moderation";
+  type: "follow" | "follow_request" | "mention" | "reblog" | "favourite" | "poll" | "update" | "direct" | "encrypted" | "quote" | "moderation" | "call";
   created_at: string;
   account: Account;
+  /** Call outcome and media kind (only on `call` notifications). */
+  call_status?: "ringing" | "requested" | "answered" | "declined" | "missed" | "unanswered";
+  call_type?: "audio" | "video" | "screen";
   status?: {
     id: string;
     content: string;
@@ -54,7 +57,18 @@ const NOTIF_LABELS: Record<string, { icon: IconName; key: string }> = {
   encrypted:      { icon: "lock", key: "notif_encrypted" },
   quote:          { icon: "quote-left", key: "notif_quoted" },
   moderation:     { icon: "shield", key: "notif_moderation" },
+  call:           { icon: "phone", key: "notif_call" },
 };
+
+/** Icon per call media kind, so the record reads at a glance. */
+const CALL_TYPE_ICONS: Record<"audio" | "video" | "screen", IconName> = {
+  audio: "phone",
+  video: "video-camera",
+  screen: "desktop",
+};
+
+/** Outcomes that mean the call never happened get muted styling; answered does not. */
+const UNANSWERED_OUTCOMES = new Set(["declined", "missed", "unanswered"]);
 
 export default function NotificationsPage() {
   const [tab, setTab] = useState<NotificationsTab>("all");
@@ -285,6 +299,15 @@ export default function NotificationsPage() {
             {notifications.map((n) => {
               const meta = NOTIF_LABELS[n.type] ?? { icon: "bell" as IconName, key: "" };
               const metaText = meta.key ? (t[meta.key as keyof typeof t] ?? n.type) : n.type;
+              // A call record shows the media kind and the outcome: "voice call ·
+              // missed" is the whole information a callee needs from the list.
+              const callType = n.call_type ?? "audio";
+              const callMediaLabel = n.type === "call"
+                ? (t[`notif_call_${callType}` as keyof typeof t] ?? callType)
+                : "";
+              const callStatusLabel = n.type === "call" && n.call_status
+                ? (t[`notif_call_${n.call_status}` as keyof typeof t] ?? n.call_status)
+                : "";
               const accountHref = profileHref(n.account);
               // Server-side filters: hide notifications whose status is filtered
               // with a "hide" action in the notifications context.
@@ -317,6 +340,33 @@ export default function NotificationsPage() {
                         {formatTime(n.created_at)}
                       </span>
                     </div>
+                    {n.type === "call" && (
+                      <div
+                        className="flex items-center gap-2"
+                        style={{ marginTop: "0.35rem", fontSize: "0.85rem", color: "var(--text-muted)" }}
+                      >
+                        <Icon
+                          name={CALL_TYPE_ICONS[callType]}
+                          size="0.9rem"
+                          color="var(--text-muted)"
+                        />
+                        <span>{callMediaLabel}</span>
+                        {callStatusLabel && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span
+                              style={
+                                n.call_status && UNANSWERED_OUTCOMES.has(n.call_status)
+                                  ? { color: "var(--warning)" }
+                                  : undefined
+                              }
+                            >
+                              {callStatusLabel}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )}
                     {n.status && (
                       <Link href={`/statuses/${encodeURIComponent(n.status.id)}`} style={{ textDecoration: "none" }}>
                         <div

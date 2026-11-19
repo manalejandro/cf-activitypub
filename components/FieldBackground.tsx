@@ -2,24 +2,36 @@
 
 import { useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
+import {
+  FIELD_TAU,
+  advectField,
+  collectFieldLinks,
+  parseCssColor,
+  seedField,
+} from "./field-background-sim";
+import type { FieldDot, RGB } from "./field-background-sim";
+import type { GPUField } from "./field-background-gpu";
 
 /**
  * The instance's signature background: a slow flow field of dots linked by
  * faint vectors, drawn behind the content of the public pages.
  *
  * Two layers, deliberately:
- *  - this Canvas2D field, which ships with **no dependencies** and runs
- *    everywhere;
- *  - a WebGPU upgrade (`@use-gpu/*`, instanced points + a WGSL flow field) that
- *    only mounts when `navigator.gpu` exists AND the packages are installed.
- *    use.gpu is WebGPU-only with no WebGL fallback, so this layer is not a
- *    progressive enhancement of the GPU one — it is the floor it stands on.
+ *  - a Canvas2D field that ships with **no dependencies** and runs everywhere;
+ *  - a WebGPU upgrade (`@use-gpu/webgpu`, instanced points + a WGSL flow
+ *    field) that only mounts when `navigator.gpu` exists. use.gpu is
+ *    WebGPU-only with no WebGL fallback, so the 2D layer is not a progressive
+ *    enhancement of the GPU one — it is the floor it stands on, and a lost
+ *    device hands the same dots back to it.
+ *
+ * Both layers run the same simulation (`field-background-sim.ts`); only the
+ * drawing differs.
  *
  * Cost discipline (this sits on the pages everybody loads first):
  *  - the dot budget is area-based and capped, halved on coarse pointers;
  *  - DPR is capped at 2 (3 on phones is invisible and 2.25x the fill);
- *  - it stops on `prefers-reduced-motion` (one static frame), when the tab is
- *    hidden, and when the element scrolls out of view;
+ *  - it stops on `prefers-reduced-motion` (one static frame, no GPU download),
+ *    when the tab is hidden, and when the element scrolls out of view;
  *  - colours are read from the CSS custom properties, so an installed palette
  *    (`lib/palettes.ts`) retints it without a code change.
  */
@@ -38,30 +50,9 @@ export interface FieldBackgroundProps {
   style?: CSSProperties;
 }
 
-const TAU = Math.PI * 2;
 const MAX_DPR = 2;
-const MAX_DOTS = 190;
-
-/**
- * Angle of the flow at a point: layered trig instead of a noise texture, which
- * keeps the bundle at zero and is smooth enough at this speed.
- */
-function fieldAngle(x: number, y: number, t: number): number {
-  return (
-    Math.sin(x * 0.85 + t * 0.55) * 0.62 +
-    Math.cos(y * 1.05 - t * 0.4) * 0.58 +
-    Math.sin((x + y) * 0.45 + t * 0.22) * 0.34
-  );
-}
-
-interface Dot {
-  x: number;
-  y: number;
-  /** Per-dot phase and speed so the field never looks like a grid marching. */
-  phase: number;
-  speed: number;
-  r: number;
-}
+const DEFAULT_ACCENT: RGB = [79 / 255, 70 / 255, 229 / 255];
+const DEFAULT_MUTED: RGB = [108 / 255, 115 / 255, 127 / 255];
 
 export function FieldBackground({
   density = 16,
@@ -73,15 +64,19 @@ export function FieldBackground({
   style,
 }: FieldBackgroundProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const gpuCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
+    const gpuCanvas = gpuCanvasRef.current;
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
     const ctx = canvas.getContext("2d");
     // No 2D context (jsdom, a locked-down browser, a failed canvas): the
-    // element stays an inert, invisible layer instead of throwing.
+    // element stays an inert, invisible layer instead of throwing, and the
+    // GPU layer is not attempted — it upgrades a working floor, never replaces
+    // one.
     if (!ctx) return;
 
     const clampOpacity = Math.min(1, Math.max(0, opacity));
@@ -91,44 +86,34 @@ export function FieldBackground({
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const coarse =
       typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+    const maxDist = Math.max(24, linkDistance);
 
-    let dots: Dot[] = [];
+    let dots: FieldDot[] = [];
+    // Reused every frame so linking allocates nothing.
+    const linkIndices: number[] = [];
     let width = 0;
     let height = 0;
     let dpr = 1;
     let raf = 0;
     let running = false;
     let visible = true;
+    let cancelled = false;
     let pointerX = 0;
     let pointerY = 0;
     let accent = "#4f46e5";
     let muted = "#6c737f";
+    let accentRgb: RGB = DEFAULT_ACCENT;
+    let mutedRgb: RGB = DEFAULT_MUTED;
+    let gpu: GPUField | null = null;
+    let gpuRequested = false;
 
     const readColors = () => {
       const styles = getComputedStyle(wrap);
       accent = styles.getPropertyValue("--accent").trim() || accent;
       muted = styles.getPropertyValue("--text-muted").trim() || muted;
-    };
-
-    const seed = () => {
-      const area = Math.max(1, width * height);
-      const budget = coarse ? MAX_DOTS / 2 : MAX_DOTS;
-      const count = Math.max(12, Math.min(budget, Math.round((area / 10_000) * (coarse ? clampDensity / 2 : clampDensity))));
-      dots = new Array(count).fill(null).map((_, i) => {
-        // A jittered grid beats uniform random: no clumps, no empty holes.
-        const cols = Math.max(1, Math.round(Math.sqrt((count * width) / Math.max(1, height))));
-        const rows = Math.max(1, Math.ceil(count / cols));
-        const cx = ((i % cols) + 0.5) * (width / cols);
-        const cy = (Math.floor(i / cols) + 0.5) * (height / rows);
-        const jitter = Math.min(width / cols, height / rows) * 0.42;
-        return {
-          x: cx + (Math.random() - 0.5) * jitter * 2,
-          y: cy + (Math.random() - 0.5) * jitter * 2,
-          phase: Math.random() * TAU,
-          speed: 0.55 + Math.random() * 0.75,
-          r: 0.7 + Math.random() * 1.5,
-        };
-      });
+      accentRgb = parseCssColor(accent, DEFAULT_ACCENT);
+      mutedRgb = parseCssColor(muted, DEFAULT_MUTED);
+      gpu?.setStyle({ accent: accentRgb, muted: mutedRgb, opacity: clampOpacity });
     };
 
     const resize = () => {
@@ -141,53 +126,30 @@ export function FieldBackground({
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      seed();
+      dots = seedField(width, height, { density: clampDensity, coarse });
       readColors();
+      gpu?.resize(width, height, dpr);
     };
 
-    const draw = () => {
+    const syncLinks = () => {
+      if (links) collectFieldLinks(dots, maxDist, linkIndices);
+      else linkIndices.length = 0;
+    };
+
+    const draw2d = (px: number, py: number) => {
       ctx.clearRect(0, 0, width, height);
       ctx.globalAlpha = clampOpacity;
-      const px = parallax ? pointerX * 10 : 0;
-      const py = parallax ? pointerY * 10 : 0;
-      const maxDist = Math.max(24, linkDistance);
 
-      if (links) {
+      if (links && linkIndices.length) {
         ctx.lineWidth = 1;
         ctx.strokeStyle = muted;
-        const cell = maxDist;
-        // Bucket the dots so linking stays linear instead of O(n^2) per frame.
-        const buckets = new Map<number, number[]>();
-        for (let i = 0; i < dots.length; i++) {
-          const d = dots[i];
-          const key = Math.floor((d.x + px) / cell) * 100000 + Math.floor((d.y + py) / cell);
-          const list = buckets.get(key);
-          if (list) list.push(i);
-          else buckets.set(key, [i]);
-        }
         ctx.globalAlpha = clampOpacity * 0.22;
         ctx.beginPath();
-        for (let i = 0; i < dots.length; i++) {
-          const a = dots[i];
-          const gx = Math.floor((a.x + px) / cell);
-          const gy = Math.floor((a.y + py) / cell);
-          for (let ox = 0; ox <= 1; ox++) {
-            for (let oy = -1; oy <= 1; oy++) {
-              if (ox === 0 && oy < 0) continue;
-              const list = buckets.get((gx + ox) * 100000 + (gy + oy));
-              if (!list) continue;
-              for (const j of list) {
-                if (j <= i) continue;
-                const b = dots[j];
-                const dx = a.x - b.x;
-                const dy = a.y - b.y;
-                const dist = Math.hypot(dx, dy);
-                if (dist > maxDist) continue;
-                ctx.moveTo(a.x + px, a.y + py);
-                ctx.lineTo(b.x + px, b.y + py);
-              }
-            }
-          }
+        for (let k = 0; k < linkIndices.length; k += 2) {
+          const a = dots[linkIndices[k]];
+          const b = dots[linkIndices[k + 1]];
+          ctx.moveTo(a.x + px, a.y + py);
+          ctx.lineTo(b.x + px, b.y + py);
         }
         ctx.stroke();
       }
@@ -197,26 +159,30 @@ export function FieldBackground({
       ctx.beginPath();
       for (const d of dots) {
         ctx.moveTo(d.x + px + d.r, d.y + py);
-        ctx.arc(d.x + px, d.y + py, d.r, 0, TAU);
+        ctx.arc(d.x + px, d.y + py, d.r, 0, FIELD_TAU);
       }
       ctx.fill();
       ctx.globalAlpha = 1;
     };
 
+    const frame = () => {
+      const px = parallax ? pointerX * 10 : 0;
+      const py = parallax ? pointerY * 10 : 0;
+      syncLinks();
+      if (gpu) gpu.draw(dots, linkIndices, px, py);
+      else draw2d(px, py);
+    };
+
+    const stop = () => {
+      running = false;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    };
+
     const step = (now: number) => {
       if (!running) return;
-      const t = now / 1000;
-      // Advect along the flow; wrap around the edges so the field is endless.
-      for (const d of dots) {
-        const a = fieldAngle(d.x / 190, d.y / 190, t * 0.35 + d.phase);
-        d.x += Math.cos(a) * d.speed * 0.35;
-        d.y += Math.sin(a) * d.speed * 0.35;
-        if (d.x < -20) d.x = width + 20;
-        else if (d.x > width + 20) d.x = -20;
-        if (d.y < -20) d.y = height + 20;
-        else if (d.y > height + 20) d.y = -20;
-      }
-      draw();
+      advectField(dots, width, height, now / 1000);
+      frame();
       raf = requestAnimationFrame(step);
     };
 
@@ -225,30 +191,67 @@ export function FieldBackground({
       running = true;
       raf = requestAnimationFrame(step);
     };
-    const stop = () => {
-      running = false;
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0;
+
+    /** A lost device (or a failed mount) returns the field to the 2D floor. */
+    const restore2d = () => {
+      gpu = null;
+      if (gpuCanvas) gpuCanvas.style.display = "none";
+      canvas.style.display = "block";
+      frame();
+      start();
     };
 
-    const onVisibility = () => {
-      if (document.hidden) stop();
-      else start();
-    };
-    const onPointer = (e: PointerEvent) => {
-      const rect = wrap.getBoundingClientRect();
-      pointerX = ((e.clientX - rect.left) / Math.max(1, rect.width) - 0.5) * 2;
-      pointerY = ((e.clientY - rect.top) / Math.max(1, rect.height) - 0.5) * 2;
+    const mountGpu = async () => {
+      if (gpuRequested || reduceMotion || !gpuCanvas) return;
+      gpuRequested = true;
+      if (typeof navigator === "undefined" || !navigator.gpu) return;
+
+      let field: GPUField | null = null;
+      try {
+        const { mountGPUField } = await import("./field-background-gpu");
+        field = await mountGPUField(
+          gpuCanvas,
+          {
+            width,
+            height,
+            dpr,
+            links,
+            style: { accent: accentRgb, muted: mutedRgb, opacity: clampOpacity },
+          },
+          () => {
+            if (!cancelled) restore2d();
+          }
+        );
+      } catch {
+        field = null;
+      }
+
+      if (cancelled) {
+        field?.destroy();
+        return;
+      }
+      if (!field) return;
+
+      gpu = field;
+      canvas.style.display = "none";
+      gpuCanvas.style.display = "block";
+      // The loop may be paused (hidden tab, off-screen, still frame): draw the
+      // first GPU frame now so swapping the canvases never leaves a blank.
+      frame();
     };
 
     resize();
-    // Reduced motion: one composed still frame, no animation loop at all.
-    draw();
+    // Reduced motion: one composed still frame, no animation loop and no GPU
+    // download at all.
+    frame();
     if (!reduceMotion) start();
+    void mountGpu();
 
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => {
       resize();
-      if (reduceMotion) draw();
+      // While running, the next frame repaints at the new size; a paused or
+      // reduced-motion layer needs the explicit repaint.
+      if (!running) frame();
     }) : null;
     ro?.observe(wrap);
 
@@ -261,11 +264,24 @@ export function FieldBackground({
       : null;
     io?.observe(wrap);
 
+    const onVisibility = () => {
+      if (document.hidden) stop();
+      else start();
+    };
+    const onPointer = (e: PointerEvent) => {
+      const rect = wrap.getBoundingClientRect();
+      pointerX = ((e.clientX - rect.left) / Math.max(1, rect.width) - 0.5) * 2;
+      pointerY = ((e.clientY - rect.top) / Math.max(1, rect.height) - 0.5) * 2;
+    };
+
     document.addEventListener("visibilitychange", onVisibility);
     if (parallax && !reduceMotion) window.addEventListener("pointermove", onPointer, { passive: true });
 
     return () => {
+      cancelled = true;
       stop();
+      gpu?.destroy();
+      gpu = null;
       ro?.disconnect();
       io?.disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
@@ -288,6 +304,10 @@ export function FieldBackground({
       }}
     >
       <canvas ref={canvasRef} style={{ display: "block", width: "100%", height: "100%" }} />
+      <canvas
+        ref={gpuCanvasRef}
+        style={{ display: "none", position: "absolute", inset: 0, width: "100%", height: "100%" }}
+      />
     </div>
   );
 }

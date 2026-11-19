@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { FieldBackground } from "@/components/FieldBackground";
 
@@ -31,5 +31,35 @@ describe("FieldBackground", () => {
   it("clamps nothing at the DOM level but keeps props optional", () => {
     const { container } = render(<FieldBackground density={999} opacity={5} links={false} />);
     expect(container.querySelector("canvas")).toBeTruthy();
+  });
+
+  it("never asks for a WebGPU context when the browser cannot provide one", () => {
+    const requested: string[] = [];
+    const fake2d = new Proxy(
+      {},
+      {
+        get: (target, prop) =>
+          prop in target ? Reflect.get(target, prop) : () => {},
+        set: (target, prop, value) => {
+          Reflect.set(target, prop, value);
+          return true;
+        },
+      }
+    );
+
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation(((type: string) => {
+        requested.push(type);
+        return type === "2d" ? fake2d : null;
+      }) as typeof HTMLCanvasElement.prototype.getContext);
+
+    try {
+      render(<FieldBackground />);
+      expect(requested).toContain("2d");
+      expect(requested).not.toContain("webgpu");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

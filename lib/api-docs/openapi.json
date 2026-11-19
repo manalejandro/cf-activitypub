@@ -15405,6 +15405,28 @@
             "type": "boolean",
             "nullable": true,
             "description": "Only returned when the limited-account policy filtered it."
+          },
+          "call_status": {
+            "type": "string",
+            "enum": [
+              "ringing",
+              "requested",
+              "answered",
+              "declined",
+              "missed",
+              "unanswered"
+            ],
+            "nullable": true,
+            "description": "Call notifications only: the recorded outcome and media kind."
+          },
+          "call_type": {
+            "type": "string",
+            "enum": [
+              "video",
+              "audio",
+              "screen"
+            ],
+            "nullable": true
           }
         }
       },

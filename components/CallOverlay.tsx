@@ -17,7 +17,7 @@ import Image from "next/image";
 import { useCall } from "@/lib/webrtc/use-call";
 import { useTimelineStream } from "@/lib/streaming/use-timeline-stream";
 import { Icon } from "@/components/Icon";
-import { useLocale } from "@/lib/i18n";
+import { useLocale, translateKey, type Translations } from "@/lib/i18n";
 import { avatarInitial } from "@/lib/avatar";
 
 interface CallOverlayProps {
@@ -33,6 +33,8 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
     remoteStream,
     startCall,
     acceptCall,
+    approveCall,
+    denyCall,
     endCall,
     toggleMute,
     toggleVideo,
@@ -92,15 +94,18 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
   if (callState.phase === "idle") return null;
 
   // ── Incoming call UI ──────────────────────────────────────────────────────
-  if (callState.phase === "incoming") {
+  // `requested` is a call held by the "ask first" policy: nothing rings until
+  // the callee approves, so it gets its own wording and no accept action.
+  if (callState.phase === "incoming" || callState.phase === "requested") {
     const { event } = callState;
+    const requested = callState.phase === "requested";
     return (
       <div
         className="fixed inset-0 z-50 flex items-center justify-center"
         style={{ backgroundColor: "rgba(0,0,0,0.75)" }}
         role="dialog"
         aria-modal="true"
-        aria-label={t.a11y_incoming_call}
+        aria-label={requested ? t.a11y_call_request : t.a11y_incoming_call}
       >
         <div
           className="rounded-2xl shadow-2xl p-8 flex flex-col items-center gap-5 w-80"
@@ -128,20 +133,25 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
             <p className="text-sm opacity-70" style={{ color: "inherit" }}>{event.callerAcct}</p>
           </div>
           <p className="text-sm opacity-60" style={{ color: "inherit" }}>
-            {event.callType === "video" ? t.call_incoming_video : t.call_incoming_voice}
+            {requested
+              ? t.call_request_incoming
+              : // A screen share is a visual call: only "audio" is announced as voice.
+                event.callType === "audio"
+                ? t.call_incoming_voice
+                : t.call_incoming_video}
           </p>
           <div className="flex gap-4 mt-2">
             <button
-              onClick={endCall}
+              onClick={requested ? denyCall : endCall}
               className="w-14 h-14 rounded-full bg-error text-white flex items-center justify-center text-2xl shadow"
-              aria-label={t.a11y_decline_call}
+              aria-label={requested ? t.a11y_deny_call : t.a11y_decline_call}
             >
               <Icon name="times" color="#fff" />
             </button>
             <button
-              onClick={acceptCall}
+              onClick={requested ? approveCall : acceptCall}
               className="w-14 h-14 rounded-full bg-success text-white flex items-center justify-center text-2xl shadow"
-              aria-label={t.a11y_accept_call}
+              aria-label={requested ? t.a11y_approve_call : t.a11y_accept_call}
             >
               <Icon name="phone" color="#fff" />
             </button>
@@ -153,6 +163,10 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
 
   // ── Blocked ───────────────────────────────────────────────────────────────
   if (callState.phase === "blocked") {
+    // The server sends a stable `error_code` (an i18n key) explaining the
+    // refusal; the blocked-by text is the fallback for an older peer.
+    const reason = (translateKey(t, callState.errorCode, t.call_blocked_by) ?? t.call_blocked_by)
+      .replace("{user}", callState.targetAcct);
     return (
       <div className="fixed bottom-4 right-4 z-50">
         <div
@@ -166,7 +180,7 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
           <Icon name="ban" size="2rem" />
           <div>
             <p className="font-semibold text-sm">{t.call_blocked}</p>
-            <p className="text-xs opacity-70">{t.call_blocked_by.replace("{user}", callState.targetAcct)}</p>
+            <p className="text-xs opacity-70">{reason}</p>
           </div>
         </div>
       </div>
@@ -174,12 +188,15 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
   }
 
   // ── Calling (waiting for answer) ─────────────────────────────────────────
-  if (callState.phase === "calling") {
+  if (callState.phase === "calling" || callState.phase === "requesting") {
+    // `requesting` means the callee's server held the offer for their approval.
     return (
       <div className="fixed bottom-4 right-4 z-50">
         <div className="bg-base-100 rounded-2xl shadow-2xl p-5 flex flex-col items-center gap-3 w-64">
           <p className="text-sm font-medium">
-            {t.call_calling.replace("{user}", callState.targetAcct)}
+            {callState.phase === "requesting"
+              ? t.call_request_pending.replace("{user}", callState.targetAcct)
+              : t.call_calling.replace("{user}", callState.targetAcct)}
           </p>
           <div className="flex gap-2 items-center">
             <span className="animate-pulse text-2xl"><Icon name="phone" size="2rem" /></span>
@@ -318,10 +335,13 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
 
   // ── Call ended banner ─────────────────────────────────────────────────────
   if (callState.phase === "ended") {
+    // Known reasons are localized; anything else falls back to the machine
+    // string with its underscores opened up.
+    const reason = callState.reason ? callReasonLabel(t, callState.reason) : null;
     return (
       <div className="fixed bottom-4 right-4 z-50">
         <div className="bg-error text-white rounded-xl px-4 py-3 shadow-lg text-sm">
-          {t.call_ended}{callState.reason ? ` (${callState.reason.replace(/_/g, " ")})` : ""}
+          {reason ?? t.call_ended}
         </div>
       </div>
     );
@@ -331,6 +351,29 @@ export function CallOverlay({ accessToken }: CallOverlayProps) {
 }
 
 // ── Public hook for initiating calls from other components ───────────────────
+
+/** Why a call ended, as the hook records it, mapped to an i18n key. */
+const CALL_END_REASON_KEYS: Record<string, string> = {
+  "call.rejected": "call_end_rejected",
+  "call.ended": "call_end_ended",
+  no_answer: "call_end_no_answer",
+  missed: "call_end_missed",
+  unanswered: "call_end_unanswered",
+  connection_failed: "call_end_connection_failed",
+  connection_lost: "call_end_connection_lost",
+  // Refusal reasons forwarded by the callee's instance.
+  blocked: "call_error_blocked",
+  nobody: "call_error_policy_nobody",
+  media_disabled: "call_error_media_disabled",
+  silenced: "call_error_caller_limited",
+  busy: "call_error_in_progress",
+};
+
+function callReasonLabel(t: Translations, reason: string): string {
+  const key = CALL_END_REASON_KEYS[reason];
+  const translated = key ? translateKey(t, key, null) : null;
+  return translated ?? `${t.call_ended} (${reason.replace(/_/g, " ")})`;
+}
 
 /**
  * Returns a function to start a call from any component.

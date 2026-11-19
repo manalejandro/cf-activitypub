@@ -276,7 +276,8 @@ function rowToAnnounce(r: Row): LocalAnnounce {
   };
 }
 
-function rowToNotification(r: Row): LocalNotification {
+/** Map a `notifications` row. Exported so the call helpers share one mapper. */
+export function rowToNotification(r: Row): LocalNotification {
   return {
     id: r.id,
     type: r.type,
@@ -285,6 +286,10 @@ function rowToNotification(r: Row): LocalNotification {
     objectId: r.object_id ?? null,
     read: Boolean(r.is_read),
     filtered: Boolean(r.filtered),
+    // Call notifications only: the recorded outcome and media kind. Absent on
+    // every other type (the columns are nullable).
+    callStatus: (r.call_status as LocalNotification["callStatus"]) ?? null,
+    callType: (r.call_type as LocalNotification["callType"]) ?? null,
     createdAt: r.created_at,
   };
 }
@@ -3891,10 +3896,20 @@ export async function createNotification(db: D1Database, notif: LocalNotificatio
   const filtered = notif.filtered ?? sender.filtered;
   const result = await db
     .prepare(
-      `INSERT OR IGNORE INTO notifications (id, type, account_id, target_account_id, object_id, is_read, filtered)
-       VALUES (?,?,?,?,?,?,?)`
+      `INSERT OR IGNORE INTO notifications (id, type, account_id, target_account_id, object_id, is_read, filtered, call_status, call_type)
+       VALUES (?,?,?,?,?,?,?,?,?)`
     )
-    .bind(notif.id, notif.type, notif.accountId, notif.targetAccountId, notif.objectId ?? null, 0, filtered ? 1 : 0)
+    .bind(
+      notif.id,
+      notif.type,
+      notif.accountId,
+      notif.targetAccountId,
+      notif.objectId ?? null,
+      0,
+      filtered ? 1 : 0,
+      notif.callStatus ?? null,
+      notif.callType ?? null
+    )
     .run();
   // A duplicate (the dedup index ignored the insert) must not be delivered
   // again: the poll-expiry pass re-runs until the author's notification marks

@@ -99,6 +99,12 @@ export default defineConfig({
             return {
               wrangler: { configPath: "./wrangler.toml" },
               main: "./test/worker.ts",
+              // The `AI`/`VECTORIZE` bindings have no local simulator, which
+              // makes the plugin start a *remote* proxy session (and demand a
+              // CLOUDFLARE_API_TOKEN) for the whole project. These tests run
+              // entirely against Miniflare: the moderation memory is mocked in
+              // `test/setup-workers.ts`, so no deployed resource is touched.
+              remoteBindings: false,
               miniflare: {
                 assets: { directory: "test/assets", binding: "ASSETS" },
                 bindings: { TEST_SCHEMA: schema.queries },

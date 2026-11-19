@@ -15,21 +15,46 @@ const DEFAULT_PREFERENCES: Record<string, string | null> = {
   "reading:expand:media": "default",
   "reading:expand:spoilers": "false",
   "ui:locale": "en",
+  // ── Calls ─────────────────────────────────────────────────────────────────
+  // Who may ring this account: nobody, only accounts that asked first, everyone.
+  "calls:policy": "nobody",
+  // Media the caller is allowed to use. Enforced when the call starts.
+  "calls:allow_audio": "true",
+  "calls:allow_video": "true",
+  "calls:allow_screen": "true",
+  // Playback volume of the remote peer during a call (0-100).
+  "calls:volume": "100",
 };
 
 const PREFERENCE_KEYS = new Set(Object.keys(DEFAULT_PREFERENCES));
 
+const BOOLEAN_PREFERENCES = new Set([
+  "posting:default:sensitive",
+  "reading:expand:spoilers",
+  "calls:allow_audio",
+  "calls:allow_video",
+  "calls:allow_screen",
+]);
+
 const VISIBILITIES = new Set(["public", "unlisted", "private", "direct"]);
 const QUOTE_POLICIES = new Set(["public", "followers", "followed", "nobody"]);
 const MEDIA_EXPANSIONS = new Set(["default", "show_all", "hide_all"]);
+const CALL_POLICIES = new Set(["nobody", "request", "everyone"]);
 // Supported UI locales come from lib/locales/supported (the same source the
 // instance API endpoints use).
 const LOCALES = new Set(SUPPORTED_LANGUAGE_CODES);
 
 // Validates and coerces a preference value into its storage (string) form.
 function normalizeValue(key: string, raw: unknown): string | null | undefined {
-  if (key === "posting:default:sensitive" || key === "reading:expand:spoilers") {
+  if (BOOLEAN_PREFERENCES.has(key)) {
     return typeof raw === "boolean" ? String(raw) : undefined;
+  }
+  if (key === "calls:volume") {
+    // Accepts a number or a numeric string (clients disagree on the shape) and
+    // stores it as an integer percentage so the value round-trips unchanged.
+    const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+    if (!Number.isFinite(n) || n < 0 || n > 100) return undefined;
+    return String(Math.round(n));
   }
   if (key === "posting:default:language") {
     if (raw === null) return null;
@@ -38,6 +63,8 @@ function normalizeValue(key: string, raw: unknown): string | null | undefined {
   }
   if (typeof raw !== "string") return undefined;
   switch (key) {
+    case "calls:policy":
+      return CALL_POLICIES.has(raw) ? raw : undefined;
     case "posting:default:license":
       // Empty clears the preference (no license); otherwise it must look like a
       // catalogue id. Unknown ids are ignored by the composers.
@@ -57,9 +84,13 @@ function normalizeValue(key: string, raw: unknown): string | null | undefined {
 }
 
 // Converts stored string values into the JSON shape the API returns.
-function toApiValue(key: string, stored: string | null): string | boolean | null {
-  if (key === "posting:default:sensitive" || key === "reading:expand:spoilers") {
+function toApiValue(key: string, stored: string | null): string | number | boolean | null {
+  if (BOOLEAN_PREFERENCES.has(key)) {
     return stored === "true";
+  }
+  if (key === "calls:volume") {
+    const n = stored === null ? NaN : Number(stored);
+    return Number.isFinite(n) ? n : Number(DEFAULT_PREFERENCES[key] ?? 100);
   }
   return stored;
 }
@@ -75,7 +106,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     .all<{ key: string; value: string }>();
 
   const stored = new Map(rows.results?.map((r) => [r.key, r.value]) ?? []);
-  const prefs: Record<string, string | boolean | null> = {};
+  const prefs: Record<string, string | number | boolean | null> = {};
   for (const key of PREFERENCE_KEYS) {
     prefs[key] = toApiValue(key, stored.has(key) ? stored.get(key)! : DEFAULT_PREFERENCES[key]);
   }
@@ -118,7 +149,7 @@ export async function PUT(request: NextRequest): Promise<Response> {
     .all<{ key: string; value: string }>();
 
   const stored = new Map(rows.results?.map((r) => [r.key, r.value]) ?? []);
-  const prefs: Record<string, string | boolean | null> = {};
+  const prefs: Record<string, string | number | boolean | null> = {};
   for (const key of PREFERENCE_KEYS) {
     prefs[key] = toApiValue(key, stored.has(key) ? stored.get(key)! : DEFAULT_PREFERENCES[key]);
   }

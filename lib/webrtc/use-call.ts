@@ -20,16 +20,30 @@ import {
   useRef,
   useState,
 } from "react";
-import type { CallIncomingEvent, CallEventPayload } from "@/lib/types/call";
+import type { CallIncomingEvent, CallEventPayload, CallType } from "@/lib/types/call";
 
 type RTCIceServerConfig = { urls: string | string[]; username?: string; credential?: string };
 
+/** How long a ringing call waits for an answer before the caller gives up. */
+const RING_TIMEOUT_MS = 45_000;
+/** How long a held "ask first" request waits for the callee's approval. */
+const REQUEST_TIMEOUT_MS = 90_000;
+/** Callee-side grace: the caller's own timer fires first, so normally the
+ *  hangup arrives before this and the overlay closes through the event. */
+const CALLEE_GRACE_MS = 5_000;
+
 export type CallState =
   | { phase: "idle" }
+  /** Ringing on the callee: Accept / Decline are offered. */
   | { phase: "incoming"; event: CallIncomingEvent }
-  | { phase: "calling"; callId: string; callType: "audio" | "video" | "screen"; targetAcct: string }
-  | { phase: "active"; callId: string; callType: "audio" | "video" | "screen"; peerAcct: string }
-  | { phase: "blocked"; targetAcct: string }
+  /** Held for approval (callee's "ask first" policy): Approve / Decline. */
+  | { phase: "requested"; event: CallIncomingEvent }
+  | { phase: "calling"; callId: string; callType: CallType; targetAcct: string }
+  /** The callee asked to approve first: waiting for `call.ringing`/`call.rejected`. */
+  | { phase: "requesting"; callId: string; callType: CallType; targetAcct: string }
+  | { phase: "active"; callId: string; callType: CallType; peerAcct: string }
+  /** The call was refused before it rang; `errorCode` is the server's i18n key. */
+  | { phase: "blocked"; targetAcct: string; errorCode?: string }
   | { phase: "ended"; reason?: string };
 
 export interface UseCallReturn {
@@ -37,9 +51,13 @@ export interface UseCallReturn {
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   /** Call a remote account. Returns the call ID or null on failure. */
-  startCall: (targetAcct: string, callType: "audio" | "video" | "screen") => Promise<string | null>;
-  /** Accept an incoming call. */
+  startCall: (targetAcct: string, callType: CallType) => Promise<string | null>;
+  /** Accept an incoming call (a held request is approved implicitly). */
   acceptCall: () => Promise<void>;
+  /** Approve a held request: the callee's own devices start ringing. */
+  approveCall: () => Promise<void>;
+  /** Decline a held request without ringing. */
+  denyCall: () => Promise<void>;
   /** Decline an incoming call or hang up an active call. */
   endCall: () => Promise<void>;
   /** Toggle local audio mute. Acquires mic on first unmute. */
@@ -100,8 +118,23 @@ export function useCall(accessToken?: string | null): UseCallReturn {
   const remoteDescSetRef = useRef(false);
   /** Timer that fires when the peer connection has been "disconnected" too long. */
   const disconnectedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Ring/request timeouts: a call nobody answers must not stay open forever. */
+  const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearCallTimers = useCallback(() => {
+    if (ringTimerRef.current) {
+      clearTimeout(ringTimerRef.current);
+      ringTimerRef.current = null;
+    }
+    if (requestTimerRef.current) {
+      clearTimeout(requestTimerRef.current);
+      requestTimerRef.current = null;
+    }
+  }, []);
 
   const cleanup = useCallback(() => {
+    clearCallTimers();
     if (disconnectedTimerRef.current) {
       clearTimeout(disconnectedTimerRef.current);
       disconnectedTimerRef.current = null;
@@ -140,7 +173,56 @@ export function useCall(accessToken?: string | null): UseCallReturn {
     pendingCandidatesRef.current = [];
     pendingOutgoingRef.current = [];
     remoteDescSetRef.current = false;
-  }, [localStream]);
+  }, [localStream, clearCallTimers]);
+
+  // ── Timeouts ──────────────────────────────────────────────────────────────
+  // A call nobody answers is ended by the *caller*, which is what the server
+  // records: "missed" for a ringing call, "unanswered" for a held request.
+  const abandonCall = useCallback(async (
+    callId: string,
+    signalType: "hangup" | "reject" | "deny",
+    reason: string
+  ): Promise<void> => {
+    await fetch(`${API_BASE}/${callId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+      body: JSON.stringify({ type: signalType }),
+    }).catch(() => {});
+    cleanup();
+    setCallState({ phase: "ended", reason });
+    setTimeout(() => setCallState({ phase: "idle" }), 3000);
+  }, [accessToken, cleanup]);
+
+  /** Close the overlay without telling the peer (its own timer ends the call). */
+  const dismissCall = useCallback((reason: string) => {
+    cleanup();
+    setCallState({ phase: "ended", reason });
+    setTimeout(() => setCallState({ phase: "idle" }), 3000);
+  }, [cleanup]);
+
+  const armTimeout = useCallback((
+    kind: "ring" | "request",
+    callId: string,
+    asCallee: boolean
+  ): void => {
+    clearCallTimers();
+    const ref = kind === "ring" ? ringTimerRef : requestTimerRef;
+    const delay = (kind === "ring" ? RING_TIMEOUT_MS : REQUEST_TIMEOUT_MS)
+      + (asCallee ? CALLEE_GRACE_MS : 0);
+    ref.current = setTimeout(() => {
+      ref.current = null;
+      if (asCallee && kind === "request") {
+        // Only a stale overlay can be left here: the caller's own request
+        // timer ends the session on the server.
+        dismissCall("unanswered");
+        return;
+      }
+      void abandonCall(callId, "hangup", asCallee ? "missed" : "no_answer");
+    }, delay);
+  }, [abandonCall, dismissCall, clearCallTimers]);
 
   // ── Connect to CallSignalingDO WebSocket ──────────────────────────────────
   const connectSignalingWs = useCallback((callId: string) => {
@@ -434,27 +516,27 @@ export function useCall(accessToken?: string | null): UseCallReturn {
         },
         body: JSON.stringify({
           target_acct: targetAcct,
-          // API stores "screen" as "video" for signaling; the call_type is preserved in client state
-          call_type: callType === "screen" ? "video" : callType,
+          // The real media kind travels end to end: the callee's "allow screen
+          // calls" permission is per type, and only "screen" tells their accept
+          // path that they receive the share instead of sharing their camera.
+          call_type: callType,
           offer_sdp: offer.sdp,
         }),
       });
 
       if (!res.ok) {
-        if (res.status === 403) {
-          const data = await res.json().catch(() => ({})) as { error?: string };
-          if (data.error === "call_blocked") {
-            cleanup();
-            setCallState({ phase: "blocked", targetAcct });
-            setTimeout(() => setCallState({ phase: "idle" }), 4000);
-            return null;
-          }
-        }
+        // A refusal carries a stable `error_code` (an i18n key). Those are the
+        // cases worth showing: the caller must learn why nothing happened.
+        const data = await res.json().catch(() => ({})) as { error?: string; error_code?: string };
         cleanup();
+        if ([403, 404, 409, 429].includes(res.status)) {
+          setCallState({ phase: "blocked", targetAcct, errorCode: data.error_code });
+          setTimeout(() => setCallState({ phase: "idle" }), 4000);
+        }
         return null;
       }
 
-      const data = await res.json() as { id: string };
+      const data = await res.json() as { id: string; state?: "requested" | "pending" };
       callIdRef.current = data.id;
 
       // Flush any ICE candidates gathered before the session ID was known.
@@ -471,7 +553,16 @@ export function useCall(accessToken?: string | null): UseCallReturn {
       pendingOutgoingRef.current = [];
 
       connectSignalingWs(data.id);
-      setCallState({ phase: "calling", callId: data.id, callType, targetAcct });
+      // A callee who asks to approve calls first holds the offer: the caller
+      // waits for `call.ringing` (approved) or `call.rejected` (denied).
+      const awaitingApproval = data.state === "requested";
+      setCallState({
+        phase: awaitingApproval ? "requesting" : "calling",
+        callId: data.id,
+        callType,
+        targetAcct,
+      });
+      armTimeout(awaitingApproval ? "request" : "ring", data.id, false);
       return data.id;
     } catch (err) {
       console.error("[call] startCall error:", err);
@@ -480,7 +571,7 @@ export function useCall(accessToken?: string | null): UseCallReturn {
     } finally {
       busyRef.current = false;
     }
-  }, [callState.phase, createPeerConnection, acquireAndAttachInitialMedia, accessToken, connectSignalingWs, cleanup]);
+  }, [callState.phase, createPeerConnection, acquireAndAttachInitialMedia, accessToken, connectSignalingWs, cleanup, armTimeout]);
 
   // ── Accept incoming call (callee side) ───────────────────────────────────
   const acceptCall = useCallback(async (): Promise<void> => {
@@ -532,6 +623,53 @@ export function useCall(accessToken?: string | null): UseCallReturn {
     }
   }, [callState, createPeerConnection, acquireAndAttachInitialMedia, accessToken, connectSignalingWs, cleanup]);
 
+  // ── Approve / deny a held request (callee side) ──────────────────────────
+  /** Approve an "ask first" call: the callee's own devices ring next. */
+  const approveCall = useCallback(async (): Promise<void> => {
+    if (busyRef.current || callState.phase !== "requested") return;
+    busyRef.current = true;
+    const { event } = callState;
+    try {
+      const res = await fetch(`${API_BASE}/${event.callId}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({ type: "approve" }),
+      }).catch(() => null);
+      if (!res?.ok) return;
+      // The server broadcasts `call.incoming` back to this device; flipping
+      // here means the ring UI appears in the same gesture that approved it.
+      clearCallTimers();
+      setCallState({ phase: "incoming", event });
+      armTimeout("ring", event.callId, true);
+    } finally {
+      busyRef.current = false;
+    }
+  }, [callState, accessToken, clearCallTimers, armTimeout]);
+
+  /** Decline a held request without ever ringing. */
+  const denyCall = useCallback(async (): Promise<void> => {
+    if (busyRef.current || callState.phase !== "requested") return;
+    busyRef.current = true;
+    const { event } = callState;
+    try {
+      await fetch(`${API_BASE}/${event.callId}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({ type: "deny" }),
+      }).catch(() => {});
+      cleanup();
+      setCallState({ phase: "idle" });
+    } finally {
+      busyRef.current = false;
+    }
+  }, [callState, accessToken, cleanup]);
+
   // ── End / decline call ───────────────────────────────────────────────────
   const endCall = useCallback(async (): Promise<void> => {
     if (busyRef.current) return;
@@ -539,8 +677,14 @@ export function useCall(accessToken?: string | null): UseCallReturn {
     try {
       const id = callIdRef.current;
       if (id) {
+        // `deny` refuses a held request (state stays `requested` server-side);
+        // `reject` refuses a ringing call; `hangup` ends anything else.
         const signalType =
-          callState.phase === "incoming" ? "reject" : "hangup";
+          callState.phase === "requested"
+            ? "deny"
+            : callState.phase === "incoming"
+              ? "reject"
+              : "hangup";
         await fetch(`${API_BASE}/${id}`, {
           method: "POST",
           headers: {
@@ -565,14 +709,62 @@ export function useCall(accessToken?: string | null): UseCallReturn {
     try { callPayload = JSON.parse(payload) as CallEventPayload; } catch { return; }
 
     switch (callPayload.type) {
-      case "call.incoming":
-        if (callState.phase === "idle") {
-          setCallState({ phase: "incoming", event: callPayload });
+      case "call.incoming": {
+        // Also arrives right after this device approved a held request: the
+        // request overlay becomes a ringing one.
+        const approving = callState.phase === "requested"
+          && callIdRef.current === callPayload.callId;
+        if (callState.phase !== "idle" && !approving) break;
+        callIdRef.current = callPayload.callId;
+        clearCallTimers();
+        setCallState({ phase: "incoming", event: callPayload });
+        // The callee's overlay gives up shortly after the caller's own timer
+        // ends the session, so a call nobody answers cannot ring forever.
+        armTimeout("ring", callPayload.callId, true);
+        break;
+      }
+
+      // A caller the callee must approve first: nothing rings until they do.
+      case "call.request": {
+        if (callState.phase !== "idle") break;
+        callIdRef.current = callPayload.callId;
+        setCallState({ phase: "requested", event: callPayload });
+        armTimeout("request", callPayload.callId, true);
+        break;
+      }
+
+      // Progress reports for the caller: the remote callee held the offer
+      // ("pending") or approved it and is ringing now ("ringing").
+      case "call.pending":
+        if (callState.phase === "calling" || callState.phase === "requesting") {
+          setCallState((prev) =>
+            prev.phase === "calling" || prev.phase === "requesting"
+              ? { phase: "requesting", callId: prev.callId, callType: prev.callType, targetAcct: prev.targetAcct }
+              : prev
+          );
+          armTimeout("request", callPayload.callId, false);
+        }
+        break;
+
+      case "call.ringing":
+        if (callState.phase === "requesting") {
+          setCallState((prev) =>
+            prev.phase === "requesting"
+              ? { phase: "calling", callId: prev.callId, callType: prev.callType, targetAcct: prev.targetAcct }
+              : prev
+          );
+          armTimeout("ring", callPayload.callId, false);
         }
         break;
 
       case "call.answered":
-        if (callState.phase === "calling" && callPayload.callId === callIdRef.current) {
+        // A callee may answer straight from a held request without an explicit
+        // CallRinging, so `requesting` accepts the answer too.
+        if (
+          (callState.phase === "calling" || callState.phase === "requesting") &&
+          callPayload.callId === callIdRef.current
+        ) {
+          clearCallTimers();
           const pc = pcRef.current;
           if (pc) {
             pc.setRemoteDescription({ type: "answer", sdp: callPayload.answerSdp })
@@ -586,7 +778,7 @@ export function useCall(accessToken?: string | null): UseCallReturn {
               .catch((e) => console.error("[call] setRemoteDescription error:", e));
           }
           setCallState((prev) =>
-            prev.phase === "calling"
+            prev.phase === "calling" || prev.phase === "requesting"
               ? { phase: "active", callId: prev.callId, callType: prev.callType, peerAcct: prev.targetAcct }
               : prev
           );
@@ -609,7 +801,13 @@ export function useCall(accessToken?: string | null): UseCallReturn {
       case "call.ended":
         if (callPayload.callId === callIdRef.current) {
           cleanup();
-          setCallState({ phase: "ended", reason: callPayload.type });
+          // The peer's refusal reason (`blocked`, `nobody`, `media_disabled`,
+          // `busy`) is more useful than the generic event type.
+          const reason =
+            callPayload.type === "call.rejected" && callPayload.reason
+              ? callPayload.reason
+              : callPayload.type;
+          setCallState({ phase: "ended", reason });
           setTimeout(() => setCallState({ phase: "idle" }), 3000);
         }
         break;
@@ -650,7 +848,7 @@ export function useCall(accessToken?: string | null): UseCallReturn {
         }
         break;
     }
-  }, [callState.phase, cleanup, accessToken]);
+  }, [callState.phase, cleanup, accessToken, armTimeout, clearCallTimers]);
 
   // ── Audio/video toggles (acquire media on demand) ────────────────────────
   const toggleMute = useCallback(async (): Promise<void> => {
@@ -779,6 +977,8 @@ export function useCall(accessToken?: string | null): UseCallReturn {
     remoteStream,
     startCall,
     acceptCall,
+    approveCall,
+    denyCall,
     endCall,
     toggleMute,
     toggleVideo,

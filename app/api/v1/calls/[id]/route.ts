@@ -9,7 +9,6 @@
 import { type NextRequest } from "next/server";
 import {
   getBaseUrl,
-  getDomain,
   json,
   badRequest,
   unauthorized,
@@ -18,14 +17,20 @@ import {
 } from "@/lib/cf";
 import { getAuthenticatedActor } from "@/lib/auth";
 import { getActorById } from "@/lib/db";
-import { broadcastEvent } from "@/lib/streaming/broadcast";
+import { broadcastEvent, type DONamespace } from "@/lib/streaming/broadcast";
 import { enqueueDeliveries } from "@/lib/activitypub/queue";
+import { rememberCallApproval } from "@/lib/calls/policy";
+import { updateCallNotificationStatus } from "@/lib/calls/notifications";
+import {
+  clearCallActiveMarkers,
+  getCallSession,
+  saveCallSession,
+  setCallActiveMarkers,
+} from "@/lib/calls/session";
 import type { CallSession, CallEventPayload } from "@/lib/types/call";
 import { env } from "cloudflare:workers";
 
 type RouteParams = { params: Promise<{ id: string }> };
-
-const CALL_TTL = 600;
 
 // ── GET ───────────────────────────────────────────────────────────────────────
 
@@ -75,7 +80,7 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
   // Ended sessions only accept idempotent hangup/reject (double-click retries),
   // everything else is rejected so stale clients can't mutate a dead call.
   const callEnded = session.state === "ended" || session.state === "rejected";
-  if (callEnded && (body.type === "hangup" || body.type === "reject")) {
+  if (callEnded && (body.type === "hangup" || body.type === "reject" || body.type === "deny")) {
     return json({ ok: true });
   }
   if (callEnded) {
@@ -83,26 +88,74 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
   }
 
   const baseUrl = getBaseUrl(env);
-  const localDomain = getDomain(env);
   const isCaller = session.callerId === actor.id;
+  const isCallee = session.calleeId === actor.id;
 
   switch (body.type) {
     case "answer": {
-      if (isCaller) return badRequest("Caller cannot send answer");
+      if (!isCallee) return badRequest("Caller cannot send answer");
       if (!body.sdp) return badRequest("Missing sdp");
       if (session.answerSdp) return badRequest("Call already answered");
+      // Answering a call the callee was asked to approve implies approval: the
+      // two-step UI is approve → ring → answer, but a direct answer must work
+      // too (a client may skip the explicit approval call).
+      if (session.state === "requested") {
+        await rememberCallApproval(env.KV, session.calleeId, session.callerId);
+      }
       session.answerSdp = body.sdp;
       session.state = "active";
       await saveCallSession(env.KV, session);
-      // The callee is now busy — block them from starting a parallel call.
-      await env.KV.put(`call:active:${session.calleeId}`, id, { expirationTtl: CALL_TTL });
+      // Both peers are now busy — block them from starting a parallel call.
+      await setCallActiveMarkers(env.KV, session);
+      await updateCallNotificationStatus(env.DB, id, session.calleeId, "answered");
 
       // Notify caller
-      await notifyPeer(env, session, session.callerId, localDomain, {
+      await notifyPeer(env, session, session.callerId, baseUrl, {
         type: "call.answered",
         callId: id,
         answerSdp: body.sdp,
       });
+      break;
+    }
+
+    // ── Requested calls: the callee approves or declines a held offer ──────
+    case "approve": {
+      if (!isCallee) return badRequest("Only the callee may approve a call");
+      if (session.state !== "requested") return badRequest("Call is not awaiting approval");
+      await rememberCallApproval(env.KV, session.calleeId, session.callerId);
+      // Now a normal ringing call: the callee's devices ring and the caller
+      // knows the request was accepted.
+      session.state = "pending";
+      await saveCallSession(env.KV, session);
+      await updateCallNotificationStatus(env.DB, id, session.calleeId, "ringing");
+      const callerActor = await getActorById(env.DB, session.callerId);
+
+      await broadcastEvent(env.TIMELINE_STREAM, session.calleeId, "call", {
+        type: "call.incoming",
+        callId: id,
+        callType: session.callType,
+        callerAcct: session.callerAcct,
+        callerDisplayName: callerActor?.displayName ?? callerActor?.username ?? session.callerAcct,
+        callerAvatar: callerActor?.avatarUrl ?? null,
+        offerSdp: session.offerSdp,
+      } satisfies CallEventPayload);
+      await notifyPeer(env, session, session.callerId, baseUrl, { type: "call.ringing", callId: id });
+      break;
+    }
+
+    case "deny": {
+      if (!isCallee) return badRequest("Only the callee may decline a call");
+      if (session.state !== "requested") return badRequest("Call is not awaiting approval");
+      session.state = "rejected";
+      await saveCallSession(env.KV, session);
+      await clearCallActiveMarkers(env.KV, session);
+      await updateCallNotificationStatus(env.DB, id, session.calleeId, "declined");
+      await notifyPeer(env, session, session.callerId, baseUrl, { type: "call.rejected", callId: id });
+      // The callee's other tabs must stop showing the request too.
+      await broadcastEvent(env.TIMELINE_STREAM, session.calleeId, "call", {
+        type: "call.rejected",
+        callId: id,
+      } satisfies CallEventPayload);
       break;
     }
 
@@ -112,7 +165,7 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
 
       // Relay ICE candidate via the signaling DO for same-instance calls
       // For cross-instance, federate via ActivityPub
-      await notifyPeer(env, session, peerActorId, localDomain, {
+      await notifyPeer(env, session, peerActorId, baseUrl, {
         type: "call.ice",
         callId: id,
         candidate: body.candidate,
@@ -133,16 +186,36 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
 
     case "hangup":
     case "reject": {
+      // The callee's record must say how the call ended while the state still
+      // knows it: cancelling a ringing call is a miss, cancelling one that was
+      // waiting for approval is "unanswered", and an answered call keeps
+      // "answered".
+      const previousState = session.state;
       session.state = body.type === "reject" ? "rejected" : "ended";
       await saveCallSession(env.KV, session);
-      await clearActiveMarkers(env.KV, session);
+      await clearCallActiveMarkers(env.KV, session);
+      if (body.type === "reject") {
+        await updateCallNotificationStatus(env.DB, id, session.calleeId, "declined");
+      } else if (previousState === "requested") {
+        // The caller gave up waiting for approval vs. the callee dropped the
+        // request themselves (already a refusal).
+        await updateCallNotificationStatus(env.DB, id, session.calleeId, isCaller ? "unanswered" : "declined");
+      } else if (previousState === "pending") {
+        await updateCallNotificationStatus(env.DB, id, session.calleeId, "missed");
+      }
 
       const peerActorId = isCaller ? session.calleeId : session.callerId;
       const eventType = body.type === "reject" ? "call.rejected" : "call.ended";
-      await notifyPeer(env, session, peerActorId, localDomain, {
+      await notifyPeer(env, session, peerActorId, baseUrl, {
         type: eventType as "call.rejected" | "call.ended",
         callId: id,
       });
+      // Stop the actor's other tabs/devices as well (the peer got its event
+      // above); without this a second tab keeps ringing until the session TTL.
+      await broadcastEvent(env.TIMELINE_STREAM, actor.id, "call", {
+        type: eventType,
+        callId: id,
+      } satisfies CallEventPayload);
 
       // Also signal via DO WebSocket
       try {
@@ -166,7 +239,7 @@ export async function POST(request: NextRequest, { params }: RouteParams): Promi
       if (session.state !== "active") return badRequest("Call is not active");
       const peerActorId = isCaller ? session.calleeId : session.callerId;
       const eventType = body.type === "renegotiate" ? "call.renegotiate" : "call.renegotiate-answer";
-      await notifyPeer(env, session, peerActorId, localDomain, {
+      await notifyPeer(env, session, peerActorId, baseUrl, {
         type: eventType as "call.renegotiate" | "call.renegotiate-answer",
         callId: id,
         sdp: body.sdp,
@@ -217,14 +290,21 @@ export async function DELETE(request: NextRequest, { params }: RouteParams): Pro
     return new Response(null, { status: 204 });
   }
 
+  const previousState = session.state;
+  const actorIsCaller = session.callerId === actor.id;
   session.state = "ended";
   await saveCallSession(env.KV, session);
-  await clearActiveMarkers(env.KV, session);
+  await clearCallActiveMarkers(env.KV, session);
+  if (previousState === "requested") {
+    await updateCallNotificationStatus(env.DB, id, session.calleeId, actorIsCaller ? "unanswered" : "declined");
+  } else if (previousState === "pending") {
+    await updateCallNotificationStatus(env.DB, id, session.calleeId, "missed");
+  }
 
   const baseUrl = getBaseUrl(env);
-  const localDomain = getDomain(env);
   const peerActorId = session.callerId === actor.id ? session.calleeId : session.callerId;
-  await notifyPeer(env, session, peerActorId, localDomain, { type: "call.ended", callId: id });
+  await notifyPeer(env, session, peerActorId, baseUrl, { type: "call.ended", callId: id });
+  await broadcastEvent(env.TIMELINE_STREAM, actor.id, "call", { type: "call.ended", callId: id });
 
   // Cross-instance federation for hangup via DELETE
   const isPeerRemote = !peerActorId.startsWith(baseUrl);
@@ -258,45 +338,17 @@ export async function DELETE(request: NextRequest, { params }: RouteParams): Pro
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-type KVNamespace = { get(key: string): Promise<string | null>; put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>; delete(key: string): Promise<void> };
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type DONamespaceAny = { idFromName(name: string): any; get(id: any): { fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> } };
-
-interface MinimalEnv {
-  KV: KVNamespace;
-  TIMELINE_STREAM: DONamespaceAny;
-  CALL_SIGNALING: DONamespaceAny;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  DELIVERY_QUEUE: any;
-  DB: D1Database;
-}
-
-async function getCallSession(kv: KVNamespace, id: string): Promise<CallSession | null> {
-  const raw = await kv.get(`call:${id}`);
-  if (!raw) return null;
-  try { return JSON.parse(raw) as CallSession; } catch { return null; }
-}
-
-async function saveCallSession(kv: KVNamespace, session: CallSession): Promise<void> {
-  await kv.put(`call:${session.id}`, JSON.stringify(session), { expirationTtl: CALL_TTL });
-}
-
-/** Drop the "active call" markers so the peers can start new calls. */
-async function clearActiveMarkers(kv: KVNamespace, session: CallSession): Promise<void> {
-  await kv.delete(`call:active:${session.callerId}`).catch(() => {});
-  await kv.delete(`call:active:${session.calleeId}`).catch(() => {});
-}
-
 async function notifyPeer(
-  env: MinimalEnv,
+  env: { TIMELINE_STREAM: DONamespace },
   session: CallSession,
   peerActorId: string,
-  localDomain: string,
+  baseUrl: string,
   event: CallEventPayload
 ): Promise<void> {
-  // Determine if peer is local
-  const isLocal = !peerActorId.includes(".") || peerActorId.includes(`//${localDomain}/`);
-  if (!isLocal) return; // Cross-instance handled separately via AP
+  // Compare full origins: `getDomain` drops the port, so a dev instance at
+  // `http://127.0.0.1:3000` never matched and local peers were skipped.
+  const origin = baseUrl.replace(/\/+$/, "");
+  if (!peerActorId.startsWith(`${origin}/`)) return; // Cross-instance handled separately via AP
 
   try {
     await broadcastEvent(env.TIMELINE_STREAM, peerActorId, "call", event);
@@ -316,6 +368,9 @@ function buildSignalActivity(
     answer: "CallAnswer",
     ice: "CallIceCandidate",
     hangup: "CallHangup",
+    reject: "CallReject",
+    deny: "CallReject",
+    approve: "CallRinging",
     renegotiate: "CallRenegotiate",
     "renegotiate-answer": "CallRenegotiateAnswer",
   };

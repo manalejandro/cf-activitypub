@@ -74,7 +74,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     standard = (form.get("subscription[standard]") as string) === "true";
 
     for (const alertName of [
-      "mention", "status", "reblog", "follow", "follow_request",
+      "mention", "status", "reblog", "follow", "follow_request", "call",
       "favourite", "poll", "update", "quote",
     ]) {
       const val = form.get(`data[alerts][${alertName}]`);
@@ -151,7 +151,7 @@ export async function PUT(request: NextRequest): Promise<Response> {
   } else {
     const form = await request.formData();
     for (const alertName of [
-      "mention", "status", "reblog", "follow", "follow_request",
+      "mention", "status", "reblog", "follow", "follow_request", "call",
       "favourite", "poll", "update", "quote",
     ]) {
       const val = form.get(`data[alerts][${alertName}]`);

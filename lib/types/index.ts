@@ -1,5 +1,7 @@
 // ActivityPub / ActivityStreams types
 
+import type { CallStatus, CallType } from "./call";
+
 export interface APObject {
   /** JSON-LD context: a URL, an object, or an array mixing both. */
   "@context"?: string | (string | Record<string, unknown>)[] | Record<string, unknown>;
@@ -439,6 +441,7 @@ export const NOTIFICATION_TYPES = [
   "encrypted",
   "quote",
   "moderation",
+  "call",
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -452,6 +455,13 @@ export interface LocalNotification {
   read: boolean;
   /** Limited-account policy: stored but hidden from the list and not pushed. */
   filtered?: boolean;
+  /**
+   * Call notifications only: the call is `objectId` and this is its outcome.
+   * The row is created when the offer arrives (`ringing`/`requested`) and
+   * updated in place, so a record always exists even if the callee was offline.
+   */
+  callStatus?: CallStatus | null;
+  callType?: CallType | null;
   createdAt: string;
 }
 
@@ -922,6 +932,9 @@ export interface MastodonNotification {
   status?: MastodonStatus;
   /** Only returned when the limited-account policy filtered it. */
   filtered?: boolean;
+  /** Call notifications only: the recorded outcome and media kind. */
+  call_status?: CallStatus;
+  call_type?: CallType;
 }
 
 export interface MastodonInstance {

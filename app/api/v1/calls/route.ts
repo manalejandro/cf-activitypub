@@ -20,14 +20,23 @@ import {
   checkRateLimit,
 } from "@/lib/cf";
 import { getAuthenticatedActor } from "@/lib/auth";
-import { getActorByUsername, isBlocked } from "@/lib/db";
+import { getActorByUsername } from "@/lib/db";
 import { generateId } from "@/lib/activitypub/utils";
 import { broadcastEvent } from "@/lib/streaming/broadcast";
 import { enqueueDeliveries } from "@/lib/activitypub/queue";
+import { notify } from "@/lib/notify";
+import { evaluateCallPermission, callDenialErrorCode, type CallDenialReason } from "@/lib/calls/policy";
+import { buildCallNotification } from "@/lib/calls/notifications";
+import { saveCallSession, setCallActiveMarkers } from "@/lib/calls/session";
 import type { CallSession, CallIncomingEvent } from "@/lib/types/call";
 import { env } from "cloudflare:workers";
 
-const CALL_TTL = 600; // 10 minutes in seconds
+const DENIAL_MESSAGES: Record<CallDenialReason, string> = {
+  nobody: "This account does not accept calls.",
+  media_disabled: "This account does not accept this kind of call.",
+  silenced: "Your account is limited and cannot place calls.",
+  blocked: "This user has blocked you.",
+};
 
 export async function POST(request: NextRequest): Promise<Response> {
   const caller = await getAuthenticatedActor(request, env.DB);
@@ -36,10 +45,17 @@ export async function POST(request: NextRequest): Promise<Response> {
   // ── Abuse protection ──────────────────────────────────────────────────────
   const { allowed } = await checkRateLimit(env.KV, `call:create:${caller.id}`, 10, 60);
   if (!allowed) {
-    return json({ error: "rate_limited", message: "Too many call attempts. Try again shortly." }, 429);
+    return json(
+      {
+        error: "rate_limited",
+        error_code: "call_error_rate_limited",
+        message: "Too many call attempts. Try again shortly.",
+      },
+      429
+    );
   }
   if (caller.suspended) {
-    return json({ error: "suspended", message: "Your account is suspended." }, 403);
+    return json({ error: "suspended", error_code: "call_error_restricted", message: "Your account is suspended." }, 403);
   }
 
   let body: { target_acct: string; call_type?: "audio" | "video" | "screen"; offer_sdp: string };
@@ -76,7 +92,10 @@ export async function POST(request: NextRequest): Promise<Response> {
   const calleeActor = await getActorByUsername(env.DB, calleeUsername, calleeDomain);
 
   if (!calleeActor) {
-    return json({ error: "Target account not found" }, 404);
+    return json(
+      { error: "call_not_found", error_code: "call_error_not_found", message: "Target account not found." },
+      404
+    );
   }
 
   const calleeId = calleeActor.id;
@@ -85,14 +104,28 @@ export async function POST(request: NextRequest): Promise<Response> {
     return badRequest("You cannot call yourself");
   }
   if (calleeActor.suspended) {
-    return json({ error: "call_blocked", message: "This account is not available." }, 403);
+    return json(
+      { error: "call_blocked", error_code: "call_error_unavailable", message: "This account is not available." },
+      403
+    );
   }
 
   // One active call per caller: prevent overlapping calls started by
   // double-clicks or a second tab.
   const activeMarker = await env.KV.get(`call:active:${caller.id}`);
   if (activeMarker) {
-    return json({ error: "call_in_progress", message: "You already have an active call." }, 409);
+    return json(
+      { error: "call_in_progress", error_code: "call_error_in_progress", message: "You already have an active call." },
+      409
+    );
+  }
+  // …and per callee: ringing a busy account would leave both sides half-open.
+  const calleeBusy = await env.KV.get(`call:active:${calleeId}`);
+  if (calleeBusy) {
+    return json(
+      { error: "call_busy", error_code: "call_error_in_progress", message: "This account is already in a call." },
+      409
+    );
   }
 
   const calleeAcct = isLocalCallee
@@ -103,13 +136,30 @@ export async function POST(request: NextRequest): Promise<Response> {
     ? caller.username
     : `${caller.username}@${caller.domain}`;
 
-  // ── Block check ──────────────────────────────────────────────────────────
-  // Only check for local callees (remote blocks are enforced at the remote instance).
+  // ── Reachability policy (local callee only) ──────────────────────────────
+  // A remote callee applies its own policy when the CallOffer reaches it; we
+  // cannot know it here, so remote calls are always attempted.
+  let requiresApproval = false;
   if (isLocalCallee) {
-    const blocked = await isBlocked(env.DB, calleeId, caller.id);
-    if (blocked) {
-      return json({ error: "call_blocked", message: "This user has blocked you." }, 403);
+    const permission = await evaluateCallPermission({
+      db: env.DB,
+      kv: env.KV,
+      calleeId,
+      callerId: caller.id,
+      callType: call_type,
+      callerSilenced: caller.silenced,
+    });
+    if (permission.result === "denied") {
+      return json(
+        {
+          error: "call_denied",
+          error_code: callDenialErrorCode(permission.reason),
+          message: DENIAL_MESSAGES[permission.reason],
+        },
+        403
+      );
     }
+    requiresApproval = permission.result === "approval_required";
   }
 
   // ── Create call session in KV ────────────────────────────────────────────
@@ -123,18 +173,18 @@ export async function POST(request: NextRequest): Promise<Response> {
     callType: call_type,
     offerSdp: offer_sdp,
     answerSdp: null,
-    state: "pending",
+    state: requiresApproval ? "requested" : "pending",
     createdAt: new Date().toISOString(),
   };
 
-  await env.KV.put(`call:${callId}`, JSON.stringify(session), {
-    expirationTtl: CALL_TTL,
-  });
-  await env.KV.put(`call:active:${caller.id}`, callId, { expirationTtl: CALL_TTL });
+  await saveCallSession(env.KV, session);
+  // Both peers are busy from the moment the session exists (not only once it
+  // is answered), so a parallel call cannot start while this one rings.
+  await setCallActiveMarkers(env.KV, session);
 
   // ── Notify callee ────────────────────────────────────────────────────────
   const incomingEvent: CallIncomingEvent = {
-    type: "call.incoming",
+    type: requiresApproval ? "call.request" : "call.incoming",
     callId,
     callType: call_type,
     callerAcct,
@@ -144,7 +194,18 @@ export async function POST(request: NextRequest): Promise<Response> {
   };
 
   if (isLocalCallee) {
-    // Fast path: push directly via streaming DO
+    // Every local call leaves a record for the callee, whether it rings now or
+    // waits for approval. This is the insert that also pushes if they are away.
+    await notify(
+      env,
+      buildCallNotification({
+        callId,
+        callerId: caller.id,
+        calleeId,
+        callType: call_type,
+        status: requiresApproval ? "requested" : "ringing",
+      })
+    );
     await broadcastEvent(env.TIMELINE_STREAM, calleeId, "call", incomingEvent);
   } else {
     // Federation path: enqueue CallOffer AP activity for delivery
@@ -160,6 +221,10 @@ export async function POST(request: NextRequest): Promise<Response> {
     ).catch(() => {});
   }
 
+  // 202 when the callee must approve the call first, 201 when it rings now.
+  if (requiresApproval) {
+    return json({ id: callId, state: "requested" }, 202);
+  }
   return json({ id: callId, state: "pending" }, 201);
 }
 
