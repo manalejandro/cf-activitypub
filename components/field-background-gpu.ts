@@ -109,19 +109,25 @@ export async function mountGPUField(
   options: GPUFieldOptions,
   onLost: () => void
 ): Promise<GPUField> {
-  const { getGPUAdapter, mountGPUDevice } = await import("@use-gpu/webgpu/mjs/web.mjs");
+  const { getGPUAdapter, mountGPUDevice, makePresentationContext } = await import(
+    "@use-gpu/webgpu/mjs/web.mjs"
+  );
 
   const adapter = await getGPUAdapter();
   const { device } = await mountGPUDevice(adapter, { required: [], optional: [], limits: {} });
 
-  const context = canvas.getContext("webgpu");
-  if (!context) {
-    device.destroy();
-    throw new Error("WebGPU canvas context unavailable");
-  }
-
   const format = navigator.gpu.getPreferredCanvasFormat();
-  context.configure({ device, format, alphaMode: "premultiplied" });
+  // `makePresentationContext` is the library's own canvas setup (context +
+  // `configure` with RENDER_ATTACHMENT|COPY_DST|COPY_SRC and premultiplied
+  // alpha). It throws when the canvas cannot take a WebGPU context, which is
+  // exactly the case the caller falls back to Canvas2D on.
+  let context: GPUCanvasContext;
+  try {
+    context = makePresentationContext(device, canvas, format);
+  } catch (err) {
+    device.destroy();
+    throw err;
+  }
 
   const shaderModule = device.createShaderModule({ code: SHADER });
 

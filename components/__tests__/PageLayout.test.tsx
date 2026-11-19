@@ -49,4 +49,16 @@ describe("PageLayout", () => {
     expect(aside).toBeInTheDocument();
     expect(aside).toHaveTextContent("side");
   });
+
+  // The app carries the landing's signature field into its own screens: one
+  // ambient, fixed layer behind the grid, visible only through the two outer
+  // channels because `.page-inner` is opaque (pinned in globals.css).
+  it("mounts the ambient field fixed behind the grid", () => {
+    const { container } = render(<PageLayout><p>main</p></PageLayout>);
+    const field = container.querySelector(".page-grid > [aria-hidden='true']") as HTMLElement;
+    expect(field).toBeInTheDocument();
+    expect(field.style.position).toBe("fixed");
+    expect(field.style.zIndex).toBe("-1");
+    expect(field.querySelector("canvas")).toBeTruthy();
+  });
 });

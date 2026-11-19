@@ -46,6 +46,13 @@ export interface FieldBackgroundProps {
   linkDistance?: number;
   /** Small pointer parallax. */
   parallax?: boolean;
+  /**
+   * Only run above this viewport width. The app's ambient layer is fixed
+   * behind the content columns and can only be seen in the outer gutters,
+   * which do not exist below ~1160px — animating a canvas nobody can see is
+   * pure battery. Unset means "always".
+   */
+  minWidth?: number;
   className?: string;
   style?: CSSProperties;
 }
@@ -60,6 +67,7 @@ export function FieldBackground({
   links = true,
   linkDistance = 96,
   parallax = true,
+  minWidth,
   className,
   style,
 }: FieldBackgroundProps) {
@@ -87,6 +95,13 @@ export function FieldBackground({
     const coarse =
       typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
     const maxDist = Math.max(24, linkDistance);
+    // A width gate keeps the ambient layer (fixed behind the app grid) from
+    // burning frames where it is hidden behind the content band.
+    const wideQuery =
+      minWidth && typeof window.matchMedia === "function"
+        ? window.matchMedia(`(min-width: ${minWidth}px)`)
+        : null;
+    let wideEnough = !wideQuery || wideQuery.matches;
 
     let dots: FieldDot[] = [];
     // Reused every frame so linking allocates nothing.
@@ -166,6 +181,7 @@ export function FieldBackground({
     };
 
     const frame = () => {
+      if (!wideEnough) return;
       const px = parallax ? pointerX * 10 : 0;
       const py = parallax ? pointerY * 10 : 0;
       syncLinks();
@@ -187,7 +203,7 @@ export function FieldBackground({
     };
 
     const start = () => {
-      if (running || reduceMotion || !visible || document.hidden) return;
+      if (running || reduceMotion || !visible || document.hidden || !wideEnough) return;
       running = true;
       raf = requestAnimationFrame(step);
     };
@@ -202,7 +218,7 @@ export function FieldBackground({
     };
 
     const mountGpu = async () => {
-      if (gpuRequested || reduceMotion || !gpuCanvas) return;
+      if (gpuRequested || reduceMotion || !gpuCanvas || !wideEnough) return;
       gpuRequested = true;
       if (typeof navigator === "undefined" || !navigator.gpu) return;
 
@@ -273,8 +289,34 @@ export function FieldBackground({
       pointerX = ((e.clientX - rect.left) / Math.max(1, rect.width) - 0.5) * 2;
       pointerY = ((e.clientY - rect.top) / Math.max(1, rect.height) - 0.5) * 2;
     };
+    // The palette lands on the root (`PaletteApplier`), possibly after this
+    // effect ran: re-read the tokens so the field wears the user's accent
+    // instead of the mount-time default.
+    const onPalette = () => {
+      readColors();
+      if (!running) frame();
+    };
+    const themeObserver =
+      typeof MutationObserver !== "undefined" ? new MutationObserver(onPalette) : null;
+    themeObserver?.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme", "style"],
+    });
+    const onWideChange = () => {
+      wideEnough = wideQuery?.matches ?? true;
+      if (!wideEnough) {
+        stop();
+        return;
+      }
+      resize();
+      frame();
+      void mountGpu();
+      start();
+    };
 
     document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("cf-ap:palette-change", onPalette);
+    wideQuery?.addEventListener("change", onWideChange);
     if (parallax && !reduceMotion) window.addEventListener("pointermove", onPointer, { passive: true });
 
     return () => {
@@ -284,10 +326,13 @@ export function FieldBackground({
       gpu = null;
       ro?.disconnect();
       io?.disconnect();
+      themeObserver?.disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("cf-ap:palette-change", onPalette);
+      wideQuery?.removeEventListener("change", onWideChange);
       window.removeEventListener("pointermove", onPointer);
     };
-  }, [density, opacity, links, linkDistance, parallax]);
+  }, [density, opacity, links, linkDistance, parallax, minWidth]);
 
   return (
     <div

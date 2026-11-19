@@ -333,6 +333,14 @@ img.emojione { display: inline; vertical-align: middle; }
   display: flex;
   min-height: 100vh;
   width: 100%;
+  /* The ambient flow field (`FieldBackground`, mounted by PageLayout) is
+     fixed behind this grid. Only the two outer channels are transparent, so
+     the content band carries the page surface itself — dots never sit behind
+     text — and the accent wash that used to come from `body` is repeated here
+     so the band keeps the same light from the top. */
+  background-color: var(--bg);
+  background-image: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent) 0, transparent 22rem);
+  background-repeat: no-repeat;
 }
 
 .page-sidebar {
