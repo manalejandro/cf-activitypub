@@ -49,7 +49,18 @@ async function serializeFullNotification(
 export async function notify(env: NotifyEnv, notif: LocalNotification): Promise<void> {
   // A filtered notification (limited-account policy) is stored but must not
   // reach the recipient's stream or devices.
-  if (!(await createNotification(env.DB, notif))) return;
+  let stored: boolean;
+  try {
+    stored = await createNotification(env.DB, notif);
+  } catch (err) {
+    // The record is enrichment: the action that produced it (a follow, a call,
+    // a favourite) is already committed, and failing it with a 500 makes the
+    // client retry the whole action for a notification it would not have shown
+    // anyway. A schema drift or a transient D1 error is logged here instead.
+    console.error("[notify] could not store notification:", notif.type, notif.id, err);
+    return;
+  }
+  if (!stored) return;
   if (env.TIMELINE_STREAM) {
     let domain = "localhost";
     try {

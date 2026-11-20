@@ -27,7 +27,13 @@ import { enqueueDeliveries } from "@/lib/activitypub/queue";
 import { notify } from "@/lib/notify";
 import { evaluateCallPermission, callDenialErrorCode, type CallDenialReason } from "@/lib/calls/policy";
 import { buildCallNotification } from "@/lib/calls/notifications";
-import { saveCallSession, setCallActiveMarkers } from "@/lib/calls/session";
+import {
+  clearCallActiveMarkers,
+  deleteCallSession,
+  findActiveCall,
+  saveCallSession,
+  setCallActiveMarkers,
+} from "@/lib/calls/session";
 import type { CallSession, CallIncomingEvent } from "@/lib/types/call";
 import { env } from "cloudflare:workers";
 
@@ -111,17 +117,17 @@ export async function POST(request: NextRequest): Promise<Response> {
   }
 
   // One active call per caller: prevent overlapping calls started by
-  // double-clicks or a second tab.
-  const activeMarker = await env.KV.get(`call:active:${caller.id}`);
-  if (activeMarker) {
+  // double-clicks or a second tab. The marker is validated against its session
+  // (a dead one is cleared) so a call that failed before the client could hang
+  // up cannot answer the retry with 409 for the rest of the TTL.
+  if (await findActiveCall(env.KV, caller.id)) {
     return json(
       { error: "call_in_progress", error_code: "call_error_in_progress", message: "You already have an active call." },
       409
     );
   }
   // …and per callee: ringing a busy account would leave both sides half-open.
-  const calleeBusy = await env.KV.get(`call:active:${calleeId}`);
-  if (calleeBusy) {
+  if (await findActiveCall(env.KV, calleeId)) {
     return json(
       { error: "call_busy", error_code: "call_error_in_progress", message: "This account is already in a call." },
       409
@@ -193,32 +199,42 @@ export async function POST(request: NextRequest): Promise<Response> {
     offerSdp: offer_sdp,
   };
 
-  if (isLocalCallee) {
-    // Every local call leaves a record for the callee, whether it rings now or
-    // waits for approval. This is the insert that also pushes if they are away.
-    await notify(
-      env,
-      buildCallNotification({
-        callId,
-        callerId: caller.id,
-        calleeId,
-        callType: call_type,
-        status: requiresApproval ? "requested" : "ringing",
-      })
-    );
-    await broadcastEvent(env.TIMELINE_STREAM, calleeId, "call", incomingEvent);
-  } else {
-    // Federation path: enqueue CallOffer AP activity for delivery
-    const callOffer = buildCallOfferActivity(baseUrl, caller.id, calleeActor, callId, call_type, offer_sdp);
-    const inboxUrl = calleeActor.inbox ?? `${calleeId}/inbox`;
-    await enqueueDeliveries(
-      env.DELIVERY_QUEUE,
-      [inboxUrl],
-      JSON.stringify(callOffer),
-      caller.id,
-      `${caller.id}#main-key`,
-      caller.privateKeyPem
-    ).catch(() => {});
+  try {
+    if (isLocalCallee) {
+      // Every local call leaves a record for the callee, whether it rings now or
+      // waits for approval. This is the insert that also pushes if they are away.
+      await notify(
+        env,
+        buildCallNotification({
+          callId,
+          callerId: caller.id,
+          calleeId,
+          callType: call_type,
+          status: requiresApproval ? "requested" : "ringing",
+        })
+      );
+      await broadcastEvent(env.TIMELINE_STREAM, calleeId, "call", incomingEvent);
+    } else {
+      // Federation path: enqueue CallOffer AP activity for delivery
+      const callOffer = buildCallOfferActivity(baseUrl, caller.id, calleeActor, callId, call_type, offer_sdp);
+      const inboxUrl = calleeActor.inbox ?? `${calleeId}/inbox`;
+      await enqueueDeliveries(
+        env.DELIVERY_QUEUE,
+        [inboxUrl],
+        JSON.stringify(callOffer),
+        caller.id,
+        `${caller.id}#main-key`,
+        caller.privateKeyPem
+      ).catch(() => {});
+    }
+  } catch (err) {
+    // The call never reached the callee. Release the session and both markers:
+    // the POST failed, so the client holds no call id and will never send the
+    // hangup that clears them, and the retry would be answered with 409 for a
+    // call nobody can see.
+    await clearCallActiveMarkers(env.KV, session);
+    await deleteCallSession(env.KV, callId);
+    throw err;
   }
 
   // 202 when the callee must approve the call first, 201 when it rings now.

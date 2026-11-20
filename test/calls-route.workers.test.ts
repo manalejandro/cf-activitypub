@@ -64,7 +64,23 @@ function makeRequest(body: Record<string, unknown>): Request {
 
 describe("POST /api/v1/calls", () => {
   it("refuses to ring a callee that is already in a call", async () => {
-    await env.KV.put(`call:active:${CALLEE}`, "another-call");
+    const otherCall = "another-call";
+    await env.KV.put(
+      `call:${otherCall}`,
+      JSON.stringify({
+        id: otherCall,
+        callerId: `${BASE}/users/carol`,
+        calleeId: CALLEE,
+        callerAcct: "carol",
+        calleeAcct: "bob",
+        callType: "audio",
+        offerSdp: "v=0",
+        answerSdp: "v=0",
+        state: "active",
+        createdAt: new Date().toISOString(),
+      })
+    );
+    await env.KV.put(`call:active:${CALLEE}`, otherCall);
 
     const res = await POST(makeRequest({ target_acct: "bob", call_type: "audio", offer_sdp: "v=0" }) as never);
     expect(res.status).toBe(409);
@@ -74,12 +90,77 @@ describe("POST /api/v1/calls", () => {
 
     // Nothing was created: no session, no marker for the caller, no record.
     expect(await env.KV.get(`call:active:${ME}`)).toBeNull();
-    expect(await env.KV.get(`call:active:${CALLEE}`)).toBe("another-call");
+    expect(await env.KV.get(`call:active:${CALLEE}`)).toBe(otherCall);
     const notifications = await env.DB
       .prepare("SELECT COUNT(*) AS n FROM notifications WHERE target_account_id = ?")
       .bind(CALLEE)
       .first<{ n: number }>();
     expect(notifications?.n).toBe(0);
+  });
+
+  it("clears a busy marker whose session is gone", async () => {
+    // The marker survived a call whose session expired or was never written:
+    // trusting it locked the caller out of every retry for the whole TTL.
+    await env.KV.put(`call:active:${ME}`, "vanished-call");
+
+    const res = await POST(makeRequest({ target_acct: "bob", call_type: "audio", offer_sdp: "v=0" }) as never);
+    expect(res.status).toBe(201);
+    const body = await res.json() as { id: string };
+    expect(await env.KV.get(`call:active:${ME}`)).toBe(body.id);
+  });
+
+  it("clears a marker for a call abandoned before it was answered", async () => {
+    const deadCall = "dead-call";
+    await env.KV.put(
+      `call:${deadCall}`,
+      JSON.stringify({
+        id: deadCall,
+        callerId: ME,
+        calleeId: CALLEE,
+        callerAcct: "alice",
+        calleeAcct: "bob",
+        callType: "audio",
+        offerSdp: "v=0",
+        answerSdp: null,
+        state: "pending",
+        createdAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      })
+    );
+    await env.KV.put(`call:active:${ME}`, deadCall);
+    await env.KV.put(`call:active:${CALLEE}`, deadCall);
+
+    const res = await POST(makeRequest({ target_acct: "bob", call_type: "audio", offer_sdp: "v=0" }) as never);
+    expect(res.status).toBe(201);
+    const body = await res.json() as { id: string };
+    expect(body.id).not.toBe(deadCall);
+    // Both peers are released, not just the one that retried.
+    expect(await env.KV.get(`call:active:${ME}`)).toBe(body.id);
+    expect(await env.KV.get(`call:active:${CALLEE}`)).toBe(body.id);
+    expect(await env.KV.get(`call:${deadCall}`)).toBeNull();
+  });
+
+  it("keeps a call that is still ringing busy", async () => {
+    const ringing = "ringing-call";
+    await env.KV.put(
+      `call:${ringing}`,
+      JSON.stringify({
+        id: ringing,
+        callerId: ME,
+        calleeId: CALLEE,
+        callerAcct: "alice",
+        calleeAcct: "bob",
+        callType: "audio",
+        offerSdp: "v=0",
+        answerSdp: null,
+        state: "pending",
+        createdAt: new Date().toISOString(),
+      })
+    );
+    await env.KV.put(`call:active:${ME}`, ringing);
+
+    const res = await POST(makeRequest({ target_acct: "bob", call_type: "audio", offer_sdp: "v=0" }) as never);
+    expect(res.status).toBe(409);
+    expect(await env.KV.get(`call:active:${ME}`)).toBe(ringing);
   });
 
   it("marks both peers busy as soon as the call is created", async () => {

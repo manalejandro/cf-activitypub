@@ -180,7 +180,23 @@ describe("call negotiation inbox handling", () => {
   it("refuses a CallOffer when the callee is already in another call", async () => {
     await allowAllCalls();
     const kv = makeKv();
-    await kv.put(`call:active:${LOCAL_ACTOR}`, "another-call");
+    const otherCall = "another-call";
+    await kv.put(
+      `call:${otherCall}`,
+      JSON.stringify({
+        id: otherCall,
+        callerId: "https://remote.example/users/carol",
+        calleeId: LOCAL_ACTOR,
+        callerAcct: "carol@remote.example",
+        calleeAcct: "bob",
+        callType: "audio",
+        offerSdp: "v=0",
+        answerSdp: "v=0",
+        state: "active",
+        createdAt: new Date().toISOString(),
+      })
+    );
+    await kv.put(`call:active:${LOCAL_ACTOR}`, otherCall);
     await processInboxActivity(makeCallActivity("CallOffer") as never, {
       db,
       baseUrl: BASE,
@@ -196,6 +212,26 @@ describe("call negotiation inbox handling", () => {
       .bind(LOCAL_ACTOR)
       .first<{ n: number }>();
     expect(notifications?.n).toBe(0);
+  });
+
+  it("ignores a busy marker whose call session is gone", async () => {
+    // A marker left behind by a call that died without a hangup used to reject
+    // every later offer with "busy" for the rest of its TTL.
+    await allowAllCalls();
+    const kv = makeKv();
+    await kv.put(`call:active:${LOCAL_ACTOR}`, "vanished-call");
+
+    await processInboxActivity(makeCallActivity("CallOffer") as never, {
+      db,
+      baseUrl: BASE,
+      kv,
+      timelineStream,
+      recipient: { id: LOCAL_ACTOR, username: "bob", privateKeyPem: "priv-bob" },
+    } as never);
+
+    expect(broadcastEvent).toHaveBeenCalled();
+    expect(await kv.get(`call:${CALL_ID}`)).not.toBeNull();
+    expect(await kv.get(`call:active:${LOCAL_ACTOR}`)).toBe(CALL_ID);
   });
 
   it("does not reset a call that already progressed when the offer is retried", async () => {

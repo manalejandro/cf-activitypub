@@ -66,6 +66,7 @@ import { evaluateCallPermission } from "@/lib/calls/policy";
 import { buildCallNotification, updateCallNotificationStatus } from "@/lib/calls/notifications";
 import {
   clearCallActiveMarkers,
+  findActiveCall,
   getCallSession,
   saveCallSession,
   setCallActiveMarkers,
@@ -2944,8 +2945,11 @@ async function handleCallOffer(activity: APActivity, ctx: InboxContext): Promise
     }
     return;
   }
-  const calleeBusy = ctx.kv ? await ctx.kv.get(`call:active:${callee.id}`) : null;
-  if (calleeBusy && calleeBusy !== callId) {
+  // A callee already in a call cannot be rung a second time. The marker is
+  // validated against its session so a call that died without a hangup does
+  // not answer every later offer with "busy".
+  const calleeActive = ctx.kv ? await findActiveCall(ctx.kv, callee.id) : null;
+  if (calleeActive && calleeActive.id !== callId) {
     await sendCallActivity(ctx, "CallReject", callerIRI, callId, { reason: "busy" });
     return;
   }
