@@ -115,6 +115,7 @@ function rowToActor(r: Row): LocalActor {
     role: r.role ?? undefined,
     suspended: r.suspended === undefined ? undefined : Boolean(r.suspended),
     suspendedAt: (r.suspended_at as string | null) ?? null,
+    suspensionLiftedAt: (r.suspension_lifted_at as string | null) ?? null,
     silenced: r.silenced === undefined ? undefined : Boolean(r.silenced),
     reserved: r.reserved === undefined ? undefined : Boolean(r.reserved),
     approved: r.approved === undefined ? undefined : Boolean(r.approved),
@@ -717,14 +718,19 @@ export async function applyRemoteSuspension(db: D1Database, actorId: string, rem
 
   if (stored === remoteSuspended) return false;
 
+  const flag = remoteSuspended ? 1 : 0;
   await db
     .prepare(
-      "UPDATE actors SET suspended = ?, suspension_origin = ?, suspended_at = ?, updated_at = datetime('now') WHERE id = ?"
+      `UPDATE actors SET suspended = ?, suspension_origin = ?, suspended_at = ?,
+         suspension_lifted_at = CASE WHEN ? = 0 THEN ? ELSE suspension_lifted_at END,
+         updated_at = datetime('now') WHERE id = ?`
     )
     .bind(
-      remoteSuspended ? 1 : 0,
+      flag,
       remoteSuspended ? "remote" : null,
       remoteSuspended ? new Date().toISOString() : null,
+      flag,
+      new Date().toISOString(),
       actorId
     )
     .run();

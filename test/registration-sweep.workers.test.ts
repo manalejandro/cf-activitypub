@@ -121,6 +121,26 @@ describe("registration sweep", () => {
     expect(await suspendedUsernames(db)).toEqual(["temp1", "temp2"]);
   });
 
+  it("does not re-suspend a freshly lifted account on a disposable domain", async () => {
+    const id = await seedActor(db, { username: "temp1", email: "bot@tempmail.ai" });
+    await db.prepare("UPDATE actors SET suspension_lifted_at = ? WHERE id = ?").bind(new Date().toISOString(), id).run();
+
+    const result = await sweep();
+
+    expect(result.suspended).toBe(0);
+    expect(await suspendedUsernames(db)).toEqual([]);
+  });
+
+  it("honours SUSPENSION_COOLDOWN_DAYS=0 for the registration sweep", async () => {
+    const id = await seedActor(db, { username: "temp1", email: "bot@tempmail.ai" });
+    await db.prepare("UPDATE actors SET suspension_lifted_at = ? WHERE id = ?").bind(new Date().toISOString(), id).run();
+
+    const result = await sweep({ SUSPENSION_COOLDOWN_DAYS: "0" });
+
+    expect(result.suspended).toBe(1);
+    expect(await suspendedUsernames(db)).toEqual(["temp1"]);
+  });
+
   it("leaves a confirmed account on a throwaway-looking domain with activity", async () => {
     await seedActor(db, { username: "real", email: "real@tempmail.ai", verified: true, posts: 2, followers: 1 });
 

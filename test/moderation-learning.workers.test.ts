@@ -153,6 +153,11 @@ describe("the Guardian learns from every suspension", () => {
     const res = await call(UNSUSPEND, "unsuspend", `${BASE}/users/spammer`, "admin-token");
     expect(res.status).toBe(200);
     expect(learnMocks.forgetSuspension).toHaveBeenCalledWith(expect.anything(), `${BASE}/users/spammer`);
+    const lifted = await db
+      .prepare("SELECT suspension_lifted_at FROM actors WHERE id = ?")
+      .bind(`${BASE}/users/spammer`)
+      .first<{ suspension_lifted_at: string | null }>();
+    expect(lifted?.suspension_lifted_at).toMatch(/^\d{4}-\d\d-\d\dT.*Z$/);
 
     const log = await db
       .prepare("SELECT details FROM moderation_log WHERE target_id = ? AND action = 'unsuspended'")

@@ -26,8 +26,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (denied) return denied;
 
   await env.DB
-    .prepare("UPDATE actors SET suspended = 0, suspension_origin = NULL, suspended_at = NULL, updated_at = datetime('now') WHERE id = ?")
-    .bind(id)
+    .prepare("UPDATE actors SET suspended = 0, suspension_origin = NULL, suspended_at = NULL, suspension_lifted_at = ?, updated_at = datetime('now') WHERE id = ?")
+    .bind(new Date().toISOString(), id)
     .run();
 
   // The moderation suspension blanked the account's posts (`suspendAccount`):

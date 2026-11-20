@@ -210,6 +210,8 @@ export interface LocalActor {
   updatedAt: string;
   /** When the account was suspended (ISO); cleared on unsuspend. */
   suspendedAt?: string | null;
+  /** Last time a suspension was lifted (ISO-Z); drives the automatic re-suspension grace period. */
+  suspensionLiftedAt?: string | null;
   // auth
   email: string | null;
   /** sha256(canonical email) — one identity per mailbox (anti-abuse). */

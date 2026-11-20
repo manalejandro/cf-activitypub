@@ -22,6 +22,7 @@ import { sendAccountExpiryWarningEmail } from "@/lib/email";
 import { SUSPENDED_PURGE_MONTHS } from "@/lib/purge-date";
 import { recordModeration } from "@/lib/moderation/log";
 import { generateId } from "@/lib/activitypub/utils";
+import { COOLDOWN_WHERE_SQL, cooldownCutoffBound } from "./cooldown";
 import type { ModerationKV } from "./util";
 
 export interface AccountExpirationEnv {
@@ -175,13 +176,17 @@ export async function sweepExpiredAccounts(env: AccountExpirationEnv): Promise<E
   }
 
   // ── Auto-suspension: the window passed without a sign-in ──────────────────
+  // A moderator who just lifted this suspension gets a grace period: without
+  // the cooldown, `last_active_at` is still old and the next tick suspends the
+  // account again — the clearest false-positive loop.
   const expiring = await env.DB
     .prepare(
       `SELECT id, username, email, last_active_at FROM actors
        WHERE ${baseWhere} AND datetime(last_active_at) <= datetime(?)
+         ${COOLDOWN_WHERE_SQL}
        ORDER BY last_active_at ASC LIMIT ?`
     )
-    .bind(suspendBefore, SUSPEND_BATCH)
+    .bind(suspendBefore, cooldownCutoffBound(env as unknown as Record<string, unknown>, now), SUSPEND_BATCH)
     .all<{ id: string; username: string; email: string | null; last_active_at: string }>();
 
   for (const row of expiring.results) {

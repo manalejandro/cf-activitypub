@@ -18,6 +18,7 @@ import type { ModerationKV } from "./util";
 import { GUARDIAN_MODEL } from "./ai";
 import { rememberAbuse, buildAbuseVectorId } from "./vectors";
 import { forgetSuspension, learnFromSuspension } from "./learn";
+import { suspensionCooldownCutoff, suspensionCooldownDays, isInSuspensionCooldown } from "./cooldown";
 import { stripHtml } from "./heuristics";
 import type { LocalActor } from "@/lib/types";
 
@@ -309,6 +310,27 @@ export async function suspendAccount(env: ModerationEnv, opts: ActionBase & { ac
   }
   if (actor.suspended) return { action: "suspended", applied: false, emailSent: false };
 
+  // An automatic decision must respect the grace period after a lift: the
+  // moderator just corrected this exact case, so re-suspending it on the next
+  // cron tick would be a false-positive loop. A human (admin or an approved
+  // Guardian agent, both `source: "user"`) is never delayed.
+  if ((opts.source ?? SYSTEM) !== "user") {
+    const cutoff = suspensionCooldownCutoff(suspensionCooldownDays(env as unknown as Record<string, unknown>));
+    if (isInSuspensionCooldown(actor, cutoff)) {
+      await recordNoAction(env, {
+        targetType: "account",
+        targetId: actorId,
+        reason: "Suspensión automática omitida durante el periodo de gracia tras un levantamiento reciente.",
+        details: {
+          stage: "suspension_cooldown",
+          suspensionLiftedAt: actor.suspensionLiftedAt,
+          ...(opts.details ?? {}),
+        },
+      });
+      return { action: "suspended", applied: false, emailSent: false, reason: "suspension_cooldown" };
+    }
+  }
+
   // Learn before anything is erased: the lesson embeds the offending content
   // the caller brought, a sample of the account's own posts and its profile, so
   // the next account that posts the same thing is caught by the content
@@ -376,8 +398,8 @@ export async function unsuspendAccount(env: ModerationEnv, opts: ActionBase & { 
   if (!actor.suspended) return { action: "unsuspended", applied: false, emailSent: false };
 
   await env.DB
-    .prepare("UPDATE actors SET suspended = 0, suspension_origin = NULL, suspended_at = NULL, updated_at = datetime('now') WHERE id = ?")
-    .bind(actorId)
+    .prepare("UPDATE actors SET suspended = 0, suspension_origin = NULL, suspended_at = NULL, suspension_lifted_at = ?, updated_at = datetime('now') WHERE id = ?")
+    .bind(new Date().toISOString(), actorId)
     .run();
   // The suspension's content blanket is reversible: restore the posts from the
   // stored AP documents (statuses deleted individually by moderation stay

@@ -28,6 +28,15 @@ export function registrationBlockedEmailDomains(env: Record<string, unknown>): s
   return [...new Set([...DISPOSABLE_EMAIL_DOMAINS, ...extra])];
 }
 
+/**
+ * Grace period after an administrator lifts a suspension. Automatic
+ * suspensions (the Guardian, the inactivity sweep, the registration sweep) are
+ * held back for this many days, so a false positive the moderator just
+ * corrected cannot be re-applied by the next cron tick. Manual actions (an
+ * administrator, an approved Guardian agent) are never delayed. 0 disables it.
+ */
+export const SUSPENSION_COOLDOWN_DAYS = 7;
+
 /** Domain matches the blocked list (subdomains included). */
 export function isBlockedEmailDomain(domain: string, blocked: string[]): boolean {
   const d = domain.trim().toLowerCase();
@@ -332,6 +341,8 @@ export interface InstanceLimits {
   instanceDormantDays: number;
   videoFrameRateLimit: number;
   videoMatrixLimit: number;
+  /** Days after lifting a suspension during which automatic suspensions are held back (0 disables). */
+  suspensionCooldownDays: number;
 }
 
 export const DEFAULT_LIMITS: InstanceLimits = {
@@ -403,6 +414,7 @@ export const DEFAULT_LIMITS: InstanceLimits = {
   instanceDormantDays: INSTANCE_DORMANT_DAYS,
   videoFrameRateLimit: VIDEO_FRAME_RATE_LIMIT,
   videoMatrixLimit: VIDEO_MATRIX_LIMIT,
+  suspensionCooldownDays: SUSPENSION_COOLDOWN_DAYS,
 };
 
 function bool(env: Record<string, unknown>, name: string, fallback: boolean): boolean {
@@ -501,6 +513,8 @@ export function resolveLimits(env: Record<string, unknown>): InstanceLimits {
     imageMatrixLimit: num(env, "IMAGE_MATRIX_LIMIT", DEFAULT_LIMITS.imageMatrixLimit),
     videoFrameRateLimit: num(env, "VIDEO_FRAME_RATE_LIMIT", DEFAULT_LIMITS.videoFrameRateLimit),
     videoMatrixLimit: num(env, "VIDEO_MATRIX_LIMIT", DEFAULT_LIMITS.videoMatrixLimit),
+    // `nonNegativeNum`: 0 is meaningful here (it disables the grace period).
+    suspensionCooldownDays: nonNegativeNum(env, "SUSPENSION_COOLDOWN_DAYS", DEFAULT_LIMITS.suspensionCooldownDays),
     sharedInboxBatch: num(env, "SHARED_INBOX_BATCH", DEFAULT_LIMITS.sharedInboxBatch),
     mediaCacheEnabled: bool(env, "MEDIA_CACHE_ENABLED", DEFAULT_LIMITS.mediaCacheEnabled),
     mediaCacheDays: num(env, "MEDIA_CACHE_DAYS", DEFAULT_LIMITS.mediaCacheDays),

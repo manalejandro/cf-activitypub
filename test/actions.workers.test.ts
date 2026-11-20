@@ -98,6 +98,62 @@ describe("suspendAccount / unsuspendAccount", () => {
   });
 });
 
+describe("automatic suspension cooldown", () => {
+  const ID = "https://cf-ap.example/users/ale";
+
+  async function setLiftedAt(value: string | null): Promise<void> {
+    await db.prepare("UPDATE actors SET suspension_lifted_at = ? WHERE id = ?").bind(value, ID).run();
+  }
+
+  it("stamps the lift so later automatic decisions can see it", async () => {
+    await insertActor(ID, "ale", "cf-ap.example", { isLocal: true, suspended: true });
+    const res = await unsuspendAccount(ENV, { actorId: ID, reason: "falsa alarma" });
+    expect(res.applied).toBe(true);
+    const row = await db.prepare("SELECT suspension_lifted_at FROM actors WHERE id = ?").bind(ID).first<{ suspension_lifted_at: string | null }>();
+    expect(row?.suspension_lifted_at).toMatch(/^\d{4}-\d\d-\d\dT.*Z$/);
+    expect(Number.isNaN(Date.parse(row!.suspension_lifted_at!))).toBe(false);
+  });
+
+  it("skips an automatic re-suspension inside the grace period and audits why", async () => {
+    await insertActor(ID, "ale", "cf-ap.example", { isLocal: true });
+    await setLiftedAt(new Date().toISOString());
+
+    const res = await suspendAccount(ENV, { actorId: ID, reason: "spam", source: "ai", confidence: "high" });
+
+    expect(res.applied).toBe(false);
+    expect(res.reason).toBe("suspension_cooldown");
+    const actor = await db.prepare("SELECT suspended FROM actors WHERE id = ?").bind(ID).first<{ suspended: number }>();
+    expect(actor?.suspended).toBe(0);
+    const log = await db
+      .prepare("SELECT details FROM moderation_log WHERE target_id = ? AND action = 'no_action'")
+      .bind(ID)
+      .first<{ details: string }>();
+    expect(JSON.parse(log!.details)).toMatchObject({ stage: "suspension_cooldown" });
+    expect(await countLog("account", ID, "suspended")).toBe(0);
+  });
+
+  it("applies an automatic suspension once the grace period passed", async () => {
+    await insertActor(ID, "ale", "cf-ap.example", { isLocal: true });
+    await setLiftedAt(new Date(Date.now() - 8 * 86_400_000).toISOString());
+
+    const res = await suspendAccount(ENV, { actorId: ID, reason: "spam", source: "ai", confidence: "high" });
+
+    expect(res.applied).toBe(true);
+    expect(await countLog("account", ID, "suspended")).toBe(1);
+  });
+
+  it("never delays a human decision, including an approved Guardian agent", async () => {
+    await insertActor(ID, "ale", "cf-ap.example", { isLocal: true });
+    await setLiftedAt(new Date().toISOString());
+
+    const res = await suspendAccount(ENV, { actorId: ID, reason: "moderación manual", source: "user", confidence: "high" });
+
+    expect(res.applied).toBe(true);
+    const actor = await db.prepare("SELECT suspended FROM actors WHERE id = ?").bind(ID).first<{ suspended: number }>();
+    expect(actor?.suspended).toBe(1);
+  });
+});
+
 describe("blockDomain", () => {
   it("inserts a domain block and suspends all cached remote accounts of the domain", async () => {
     await insertActor("https://spam.example/users/a", "a", "spam.example");

@@ -16709,6 +16709,10 @@
           },
           "videoMatrixLimit": {
             "type": "number"
+          },
+          "suspensionCooldownDays": {
+            "type": "number",
+            "description": "Days after lifting a suspension during which automatic suspensions are held back (0 disables)."
           }
         },
         "description": "Effective instance limits — the shape exposed to clients via /api/v1/instance."

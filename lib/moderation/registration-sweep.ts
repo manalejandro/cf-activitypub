@@ -5,6 +5,7 @@ import { recordModeration } from "@/lib/moderation/log";
 import type { ModerationKV } from "./util";
 import { sendAdminAlertEmail } from "@/lib/email";
 import { learnFromSuspension } from "./learn";
+import { COOLDOWN_WHERE_SQL, cooldownCutoffBound } from "./cooldown";
 
 /**
  * Registration hygiene sweep.
@@ -58,6 +59,7 @@ const MAX_LESSONS_PER_RUN = 5;
 export async function sweepAbusiveRegistrations(env: RegistrationSweepEnv): Promise<RegistrationSweepResult> {
   const result: RegistrationSweepResult = { suspended: 0, deleted: 0, usernames: [] };
   const blockedDomains = registrationBlockedEmailDomains(env as unknown as Record<string, unknown>);
+  const cutoff = cooldownCutoffBound(env as unknown as Record<string, unknown>);
 
   // ── Suspensions: disposable mail domains ────────────────────────────────
   // Only accounts with no confirmed identity or no sign of life: a real user
@@ -70,9 +72,10 @@ export async function sweepAbusiveRegistrations(env: RegistrationSweepEnv): Prom
          AND COALESCE(reserved, 0) = 0
          AND (email_verified = 0
               OR (statuses_count = 0 AND followers_count = 0 AND following_count = 0))
+         ${COOLDOWN_WHERE_SQL}
        ORDER BY created_at DESC LIMIT ?`
     )
-    .bind(DOMAIN_SCAN_LIMIT)
+    .bind(cutoff, DOMAIN_SCAN_LIMIT)
     .all<{ id: string; username: string; email: string }>();
   const disposable = localActors.results.filter((row) => isBlockedEmailDomain(emailDomain(row.email), blockedDomains));
 
@@ -86,9 +89,10 @@ export async function sweepAbusiveRegistrations(env: RegistrationSweepEnv): Prom
          GROUP BY canonical_email_hash HAVING COUNT(*) >= 3
        ) f ON f.h = a.canonical_email_hash
        WHERE a.is_local = 1 AND a.suspended = 0
+         ${COOLDOWN_WHERE_SQL}
        LIMIT ?`
     )
-    .bind(MAX_SUSPENSIONS)
+    .bind(cutoff, MAX_SUSPENSIONS)
     .all<{ id: string; username: string; email: string | null }>();
 
   const targets = new Map<string, { username: string; reason: string }>();

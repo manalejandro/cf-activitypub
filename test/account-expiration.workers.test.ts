@@ -147,6 +147,35 @@ describe("account expiration sweep", () => {
     expect(logged?.reason).toContain("Inactividad");
   });
 
+  it("does not re-suspend a freshly lifted account by inactivity", async () => {
+    const id = await seedLocalActor({ username: "idle", lastActive: monthsAgo(13) });
+    // What `unsuspendAccount` writes when a moderator corrects a false positive.
+    await db
+      .prepare("UPDATE actors SET suspension_lifted_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), id)
+      .run();
+    const fake = fakeEnv();
+
+    const result = await sweepExpiredAccounts(fake.env);
+
+    expect(result.suspended).toBe(0);
+    expect((await db.prepare("SELECT suspended FROM actors WHERE id = ?").bind(id).first<{ suspended: number }>())?.suspended).toBe(0);
+  });
+
+  it("honours SUSPENSION_COOLDOWN_DAYS=0 for the inactivity sweep", async () => {
+    const id = await seedLocalActor({ username: "idle", lastActive: monthsAgo(13) });
+    await db
+      .prepare("UPDATE actors SET suspension_lifted_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), id)
+      .run();
+    const fake = fakeEnv({ SUSPENSION_COOLDOWN_DAYS: "0" });
+
+    const result = await sweepExpiredAccounts(fake.env);
+
+    expect(result.suspended).toBe(1);
+    expect((await db.prepare("SELECT suspended FROM actors WHERE id = ?").bind(id).first<{ suspended: number }>())?.suspended).toBe(1);
+  });
+
   it("purges accounts suspended for a month, federating Delete{Actor}", async () => {
     const id = await seedLocalActor({ username: "gone", lastActive: monthsAgo(14), suspended: true, suspendedAt: monthsAgo(2) });
     // A follower so the Delete has somewhere to go.

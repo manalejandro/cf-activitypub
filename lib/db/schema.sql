@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS actors (
   show_media_replies INTEGER NOT NULL DEFAULT 1,     -- profile display: include replies in Media (toot:showRepliesInMedia)
   attribution_domains TEXT NOT NULL DEFAULT '[]',    -- JSON array of domains whose links are attributed to this account
   suspended_at       TEXT,                           -- when the account was suspended (inactivity purge after 1 month)
+  suspension_lifted_at TEXT,                         -- last time a suspension was lifted (ISO-Z; automatic re-suspension cooldown)
   UNIQUE (username, domain)
 );
 
